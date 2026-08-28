@@ -37,59 +37,42 @@
 - Create: `pytest.ini`
 - Create: `main.py`
 - Modify: `requirements.txt`
-- Test: `tests/test_project_contract.py`
 
 **Interfaces:**
 - Consumes: código Python e testes existentes.
 - Produces: instalação `pip install -r requirements-dev.txt`, comando `pytest` determinístico, `python main.py run` e entry point `tenable-ingestion = ingestion.cli:main`.
 
-- [ ] **Step 1: Escrever o teste de contrato do projeto**
+- [ ] **Step 1: Confirmar a falha comportamental inicial**
 
-```python
-from pathlib import Path
+Run: `python -m pytest --collect-only -q`
 
+Expected: FAIL com colisão entre `tests/` e `samples_s3/tests/`, demonstrando que o comando padrão ainda não é determinístico.
 
-ROOT = Path(__file__).resolve().parents[1]
+- [ ] **Step 2: Criar metadados e dependências concretos**
 
+`requirements.txt` deve conter os floors `boto3>=1.36`, `python-dotenv>=1.0`, `psycopg[binary]>=3.2`, `alembic>=1.14`, `SQLAlchemy>=2.0` e `ijson>=3.3`. `requirements-dev.txt` inclui `-r requirements.txt`, `pytest>=8.3`, `PyYAML>=6.0` e `cfn-lint>=1.20`. `pytest.ini` define `testpaths = tests`, `norecursedirs = samples_s3 .git .venv` e registra o marker `banco`. `pyproject.toml` declara Python `>=3.11` e o script `tenable-ingestion`; `main.py` é um wrapper fino que termina com `raise SystemExit(main())`.
 
-def test_pytest_limita_coleta_ao_diretorio_principal():
-    texto = (ROOT / "pytest.ini").read_text(encoding="utf-8")
-    assert "testpaths = tests" in texto
-    assert "norecursedirs = samples_s3" in texto
-
-
-def test_dependencias_do_pipeline_estao_declaradas():
-    texto = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
-    for pacote in ("boto3", "python-dotenv", "psycopg", "alembic", "sqlalchemy", "ijson"):
-        assert pacote in texto
-
-
-def test_main_delega_para_cli_da_ingestao():
-    texto = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "from ingestion.cli import main" in texto
-```
-
-- [ ] **Step 2: Confirmar a falha inicial**
-
-Run: `python -m pytest tests/test_project_contract.py -q`
-
-Expected: FAIL porque `pytest.ini`, `pyproject.toml` e as dependências completas ainda não existem.
-
-- [ ] **Step 3: Criar metadados e dependências concretos**
-
-`requirements.txt` deve conter os floors `boto3>=1.36`, `python-dotenv>=1.0`, `psycopg[binary]>=3.2`, `alembic>=1.14`, `SQLAlchemy>=2.0` e `ijson>=3.3`. `requirements-dev.txt` inclui `-r requirements.txt`, `pytest>=8.3` e `PyYAML>=6.0`. `pytest.ini` define `testpaths = tests`, `norecursedirs = samples_s3 .git .venv` e registra o marker `banco`. `pyproject.toml` declara Python `>=3.11` e o script `tenable-ingestion`; `main.py` é um wrapper fino que termina com `raise SystemExit(main())`.
-
-- [ ] **Step 4: Proteger artefatos locais**
+- [ ] **Step 3: Proteger artefatos locais**
 
 `.gitignore` deve ignorar `.venv/`, `__pycache__/`, `.pytest_cache/`, `.env`, `*.py[cod]`, cobertura, CSVs gerados e diretórios temporários de PostgreSQL, sem ignorar fixtures JSON.
 
-- [ ] **Step 5: Rodar o baseline sem PostgreSQL**
+- [ ] **Step 4: Verificar os contratos pelo comportamento real**
+
+Run: `python -m pytest --collect-only -q`
+
+Expected: coleta somente a suíte principal, sem colisão.
+
+Run: `python main.py --help`
+
+Run: `python -m ingestion.cli --help`
+
+Expected: ambos retornam código 0 e expõem os mesmos comandos.
 
 Run: `python -m pytest -q`
 
 Expected: 36+ testes passando, testes marcados `banco` pulados quando `TEST_PG_DSN` não estiver definido, e nenhuma colisão com `samples_s3/tests`.
 
-- [ ] **Step 6: Commit do baseline**
+- [ ] **Step 5: Commit do baseline**
 
 ```powershell
 git add .
@@ -104,38 +87,22 @@ git commit -m "chore: establish ingestion project baseline"
 - Create: `scripts/test-postgres.ps1`
 - Create: `compose.yaml`
 - Modify: `tests/conftest.py`
-- Test: `tests/test_database_harness.py`
 
 **Interfaces:**
 - Consumes: `TEST_PG_DSN` e executáveis PostgreSQL 14+.
 - Produces: `scripts/test-postgres.ps1 -PostgresBin <dir> -Port 55432`, que cria cluster temporário com auth `trust`, executa pytest e sempre para/remove apenas o diretório temporário validado.
 
-- [ ] **Step 1: Escrever teste do contrato do harness**
+- [ ] **Step 1: Confirmar a falha inicial do comando desejado**
 
-```python
-from pathlib import Path
-
-
-def test_harness_usa_cluster_temporario_e_finally():
-    texto = (Path(__file__).resolve().parents[1] / "scripts" / "test-postgres.ps1").read_text()
-    assert "[guid]::NewGuid()" in texto
-    assert "initdb" in texto
-    assert "pg_ctl" in texto
-    assert "finally" in texto
-    assert "TEST_PG_DSN" in texto
-```
-
-- [ ] **Step 2: Confirmar a falha inicial**
-
-Run: `python -m pytest tests/test_database_harness.py -q`
+Run: `.\scripts\test-postgres.ps1 -PostgresBin 'C:\Program Files\PostgreSQL\18\bin' -Port 55432`
 
 Expected: FAIL porque o harness ainda não existe.
 
-- [ ] **Step 3: Implementar o harness seguro**
+- [ ] **Step 2: Implementar o harness seguro**
 
 O script recebe `PostgresBin` e `Port`, cria um filho com GUID sob `[IO.Path]::GetTempPath()`, valida com `GetFullPath()` que o alvo permanece sob esse temp root, executa `initdb --auth=trust --encoding=UTF8`, inicia somente em `127.0.0.1`, cria o database `tenable_ingestion_test`, define `TEST_PG_DSN`, roda `python -m pytest -q` e, em `finally`, usa `pg_ctl stop` antes de remover o diretório exato. `compose.yaml` fornece alternativa PostgreSQL 16 com healthcheck e porta `55432`.
 
-- [ ] **Step 4: Instalar dependências em `.venv` e executar a suíte PostgreSQL**
+- [ ] **Step 3: Instalar dependências em `.venv` e executar a suíte PostgreSQL**
 
 Run: `.venv\Scripts\python -m pip install -r requirements-dev.txt`
 
@@ -143,10 +110,14 @@ Run: `.\scripts\test-postgres.ps1 -PostgresBin 'C:\Program Files\PostgreSQL\18\b
 
 Expected: os testes atualmente corretos passam e as falhas reais do motor/eventos ficam registradas como baseline para Task 3.
 
+- [ ] **Step 4: Verificar cleanup e alternativa Compose**
+
+Após a execução, confirmar que o PID do servidor temporário terminou e que o diretório com GUID foi removido. Quando Docker estiver disponível, executar `docker compose config` e `docker compose up --wait postgres`; ausência local do Docker deve ser registrada como limitação ambiental.
+
 - [ ] **Step 5: Commit do harness**
 
 ```powershell
-git add scripts/test-postgres.ps1 compose.yaml tests/conftest.py tests/test_database_harness.py
+git add scripts/test-postgres.ps1 compose.yaml tests/conftest.py
 git commit -m "test: add disposable PostgreSQL harness"
 ```
 
@@ -510,15 +481,23 @@ git commit -m "feat: add ingestion observability and reconciliation"
 - [ ] **Step 1: Escrever testes vermelhos dos artefatos**
 
 ```python
+import subprocess
+import sys
+
+import yaml
+
+
 def test_cronjob_proibe_concorrencia():
     doc = yaml.safe_load((ROOT / "deploy/k8s/cronjob.yaml").read_text())
     assert doc["spec"]["concurrencyPolicy"] == "Forbid"
 
 
 def test_template_declara_quatro_alarmes():
-    texto = (ROOT / "deploy/cloudwatch-alarms.yaml").read_text()
-    for nome in ("HoursSinceLastManifest", "FilesQuarantined", "JobDurationSeconds", "FindingsOpenChangePercent"):
-        assert nome in texto
+    subprocess.run(
+        [sys.executable, "-m", "cfnlint", "deploy/cloudwatch-alarms.yaml"],
+        cwd=ROOT,
+        check=True,
+    )
 ```
 
 - [ ] **Step 2: Confirmar falhas**
@@ -563,36 +542,30 @@ git commit -m "feat: add EKS jobs and CloudWatch alarms"
 - Rewrite: `README.md`
 - Create: `docs/runbook.md`
 - Create: `docs/acceptance.md`
-- Create: `tests/test_documentation_contract.py`
 
 **Interfaces:**
 - Consumes: CLI, variáveis, migrações, deploy e alarmes implementados nas tarefas anteriores.
 - Produces: caminho reproduzível para setup, seed, corte manual, incremental, quarentena, reprocesso, reconciliação, deploy e diagnóstico.
 
-- [ ] **Step 1: Escrever teste vermelho da configuração documentada**
+- [ ] **Step 1: Confirmar o comportamento atual que a documentação precisa representar**
 
-```python
-def test_env_example_documenta_config_obrigatoria():
-    texto = (ROOT / ".env.example").read_text()
-    for nome in ("TENABLE_BUCKET", "TENABLE_PREFIX", "PG_DSN", "MAX_ATTEMPTS", "EXPECTED_SCHEMA_VERSION", "CLOUDWATCH_NAMESPACE", "RETENTION_MONTHS"):
-        assert f"{nome}=" in texto
-```
+Run: `.venv\Scripts\python main.py --help`
 
-- [ ] **Step 2: Confirmar falha**
+Run: `.venv\Scripts\python -m ingestion.cli status --help`
 
-Run: `.venv\Scripts\python -m pytest tests/test_documentation_contract.py -q`
+Run: `.venv\Scripts\alembic current`
 
-Expected: FAIL porque `.env.example` e README ainda descrevem principalmente o exportador CSV legado.
+Expected: CLI responde; Alembic consulta o banco descartável quando `PG_DSN` estiver definido. A documentação é validada contra esses comandos reais, não por busca de texto.
 
-- [ ] **Step 3: Documentar operação sem esconder limites externos**
+- [ ] **Step 2: Documentar operação sem esconder limites externos**
 
 README apresenta o pipeline PostgreSQL como fluxo principal e mantém o exportador legado em seção separada. Runbook inclui comandos exatos para `init-db`, `run --seed --limit 1`, `status`, `set-mode INCREMENTAL --cutoff`, `quarantine`, `reprocess`, `reconcile`, migrações, deploy e rollback operacional.
 
-- [ ] **Step 4: Mapear os nove critérios de aceite**
+- [ ] **Step 3: Mapear os nove critérios de aceite**
 
 `docs/acceptance.md` liga cada critério a teste/comando/evidência. Critérios locais aprovados recebem resultado e data; bucket real, console Tenable, e-mail do Data Stream, HML e aplicação do template AWS permanecem `EXTERNAL_VALIDATION_REQUIRED` com comando de verificação, nunca marcados como aprovados sem acesso.
 
-- [ ] **Step 5: Executar verificação final**
+- [ ] **Step 4: Executar verificação final**
 
 Run: `.venv\Scripts\python -m pytest -q`
 
@@ -602,13 +575,13 @@ Run: `.venv\Scripts\python -m compileall -q ingestion migrations tests`
 
 Expected: todas as suítes locais PASS; somente validações que exigem sistemas externos permanecem explicitamente pendentes.
 
-- [ ] **Step 6: Commit da documentação e aceite**
+- [ ] **Step 5: Commit da documentação e aceite**
 
 ```powershell
-git add .env.example README.md docs tests/test_documentation_contract.py
+git add .env.example README.md docs
 git commit -m "docs: complete ingestion operations and acceptance guide"
 ```
 
-- [ ] **Step 7: Revisão final do branch**
+- [ ] **Step 6: Revisão final do branch**
 
 Gerar diff desde o commit baseline, revisar aderência integral à spec, corrigir apenas achados comprovados, repetir as verificações e usar `superpowers:verification-before-completion` antes de declarar conclusão.
