@@ -1,10 +1,10 @@
 """Teste de idempotência obrigatório (SPEC seção 10.1).
 
     1. Rodar ingestão completa sobre um conjunto de payloads
-    2. Registrar: count(finding_current), count(finding_event), checksum de estado
+    2. Registrar count + checksum completo de current, event, plugin e recast
     3. Limpar ingest_file (apenas ela)
     4. Rodar a ingestão exatamente igual de novo
-    5. Os três valores DEVEM ser idênticos
+    5. Os oito valores DEVEM ser idênticos
 
 Precisa de PostgreSQL (`TEST_PG_DSN`); sem ela é pulado.
 """
@@ -48,43 +48,42 @@ def _cenario() -> Bucket:
 
 
 def _instantaneo(conn) -> dict:
-    """Contagens + checksum. O checksum é sobre a linha inteira (`t::text`),
-    então qualquer coluna que mexesse sozinha — inclusive `last_ingested_at` —
-    apareceria como diferença."""
+    """Contagem + checksum canônico da linha completa nas quatro estruturas."""
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) AS total FROM finding_current")
-        findings = cur.fetchone()["total"]
-        cur.execute("SELECT count(*) AS total FROM finding_event")
-        eventos = cur.fetchone()["total"]
         cur.execute(
-            "SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t.finding_id), '')) AS h "
+            "SELECT count(*) AS total, "
+            "       md5(coalesce(string_agg(t::text, '|' ORDER BY t.finding_id), '')) AS h "
             "FROM finding_current t"
         )
-        checksum_estado = cur.fetchone()["h"]
+        current = cur.fetchone()
         cur.execute(
-            "SELECT md5(coalesce(string_agg("
-            "  finding_id || event_type || occurred_at::text, '|' "
-            "  ORDER BY finding_id, event_type, occurred_at), '')) AS h "
-            "FROM finding_event"
+            "SELECT count(*) AS total, "
+            "       md5(coalesce(string_agg(e::text, '|' "
+            "           ORDER BY e.finding_id, e.event_type, e.occurred_at, e.id), '')) AS h "
+            "FROM finding_event e"
         )
-        checksum_eventos = cur.fetchone()["h"]
+        event = cur.fetchone()
         cur.execute(
-            "SELECT md5(coalesce(string_agg(p::text, '|' ORDER BY p.plugin_id), '')) AS h "
+            "SELECT count(*) AS total, "
+            "       md5(coalesce(string_agg(p::text, '|' ORDER BY p.plugin_id), '')) AS h "
             "FROM plugin p"
         )
-        checksum_plugin = cur.fetchone()["h"]
+        plugin = cur.fetchone()
         cur.execute(
-            "SELECT md5(coalesce(string_agg(r::text, '|' ORDER BY r.finding_id), '')) AS h "
+            "SELECT count(*) AS total, "
+            "       md5(coalesce(string_agg(r::text, '|' ORDER BY r.finding_id), '')) AS h "
             "FROM finding_recast r"
         )
-        checksum_recast = cur.fetchone()["h"]
+        recast = cur.fetchone()
     return {
-        "findings": findings,
-        "eventos": eventos,
-        "estado": checksum_estado,
-        "eventos_hash": checksum_eventos,
-        "plugin": checksum_plugin,
-        "recast": checksum_recast,
+        "finding_current_count": current["total"],
+        "finding_current_hash": current["h"],
+        "finding_event_count": event["total"],
+        "finding_event_hash": event["h"],
+        "plugin_count": plugin["total"],
+        "plugin_hash": plugin["h"],
+        "finding_recast_count": recast["total"],
+        "finding_recast_hash": recast["h"],
     }
 
 
@@ -94,7 +93,17 @@ def test_reprocessar_tudo_produz_estado_identico(ingestor, conn, modo):
 
     ingestor(bucket.store).executar(modo=modo)
     antes = _instantaneo(conn)
-    assert antes["findings"] > 0
+    assert antes["finding_current_count"] == 5
+    assert antes["finding_event_count"] == (9 if modo == "INCREMENTAL" else 0)
+    assert antes["plugin_count"] == 2
+    assert antes["finding_recast_count"] == 1
+    for chave in (
+        "finding_current_hash",
+        "finding_event_hash",
+        "plugin_hash",
+        "finding_recast_hash",
+    ):
+        assert len(antes[chave]) == 32
 
     # limpa APENAS ingest_file: some a camada 1 (idempotência de arquivo) e a
     # garantia passa a depender das camadas 3 e 4 — a guarda `>` estrita no
@@ -106,6 +115,42 @@ def test_reprocessar_tudo_produz_estado_identico(ingestor, conn, modo):
     depois = _instantaneo(conn)
 
     assert depois == antes
+
+
+def test_instantaneo_detecta_mudanca_na_linha_completa_das_quatro_estruturas(
+    ingestor, conn
+):
+    bucket = _cenario()
+    ingestor(bucket.store).executar(modo="INCREMENTAL")
+    antes = _instantaneo(conn)
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE finding_current SET last_ingested_at = last_ingested_at + interval '1 second' "
+            "WHERE finding_id = (SELECT min(finding_id) FROM finding_current)"
+        )
+        cur.execute(
+            "UPDATE finding_event SET detected_at = detected_at + interval '1 second' "
+            "WHERE id = (SELECT min(id) FROM finding_event)"
+        )
+        cur.execute(
+            "UPDATE plugin SET updated_at = updated_at + interval '1 second' "
+            "WHERE plugin_id = (SELECT min(plugin_id) FROM plugin)"
+        )
+        cur.execute(
+            "UPDATE finding_recast SET ingested_at = ingested_at + interval '1 second' "
+            "WHERE finding_id = (SELECT min(finding_id) FROM finding_recast)"
+        )
+
+    depois = _instantaneo(conn)
+    for estrutura in (
+        "finding_current",
+        "finding_event",
+        "plugin",
+        "finding_recast",
+    ):
+        assert depois[f"{estrutura}_count"] == antes[f"{estrutura}_count"]
+        assert depois[f"{estrutura}_hash"] != antes[f"{estrutura}_hash"]
 
 
 def test_terceira_passada_tambem_nao_move_nada(ingestor, conn):

@@ -5,6 +5,8 @@
 -- state. Assim, somente um update estritamente posterior pode ressuscitar a
 -- linha. O empate só é aceito quando o update efetivo veio antes no mesmo
 -- staging, conforme registrado por 40_upsert_current.sql.
+-- Tombstone posterior a um finding já apagado também avança o relógio, sem novo
+-- DELETED: 20_events.sql registra só a transição lógica deleted_at NULL -> valor.
 
 WITH ultimo_delete AS (
     SELECT DISTINCT ON (finding_id)

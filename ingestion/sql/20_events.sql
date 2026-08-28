@@ -109,7 +109,9 @@ FROM timeline t
 WHERE t.old_state <> 'FIXED' AND t.state = 'FIXED'
 
 UNION ALL
--- Delete é uma transição própria: nunca converte state em FIXED.
+-- Delete é uma transição própria: nunca converte state em FIXED. Só a passagem
+-- de ativo para apagado gera evento; tombstone posterior apenas confirma/avança
+-- a versão persistida em 45_apply_deletes.sql.
 SELECT d.finding_id, d.product, 'DELETED', d.delete_clock,
        d.old_state, NULL,
        to_jsonb(d.old_state), NULL::jsonb,
