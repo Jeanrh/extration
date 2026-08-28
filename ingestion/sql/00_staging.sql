@@ -106,6 +106,7 @@ CREATE TEMP TABLE stg_recast (
     changed_result      text,
     rule_created_at     timestamptz,
     rule_updated_at     timestamptz,
+    source_indexed      timestamptz,
     deleted_at          timestamptz,
     raw                 jsonb
 ) ON COMMIT DROP;

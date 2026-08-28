@@ -13,6 +13,7 @@ import json
 import psycopg
 import pytest
 
+from conftest import RAIZ
 from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
 from ingestion import loader as loader_mod
 from ingestion.config import TIPOS_PAYLOAD
@@ -55,6 +56,49 @@ def estado(conn, finding_id):
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM finding_current WHERE finding_id = %s", (finding_id,))
         return cur.fetchone()
+
+
+def plugin(conn, plugin_id=14272):
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM plugin WHERE plugin_id = %s", (plugin_id,))
+        return cur.fetchone()
+
+
+def recast(conn, finding_id):
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM finding_recast WHERE finding_id = %s", (finding_id,))
+        return cur.fetchone()
+
+
+def adicionar_plugin(bucket, *, indexed, solution):
+    registro = finding_vm(finding_id="plugin-clock", indexed=indexed)
+    registro["plugin"]["solution"] = solution
+    bucket.adicionar("FINDING", envelope("FINDING", [registro]))
+
+
+def adicionar_recast(bucket, *, finding_id="recast-clock", updated_at, rule_comment):
+    bucket.adicionar(
+        "FINDING_ENRICHED_ATTRIBUTES",
+        envelope(
+            "FINDING_ENRICHED_ATTRIBUTES",
+            [enriched(
+                finding_id=finding_id,
+                updated_at=updated_at,
+                rule_comment=rule_comment,
+            )],
+        ),
+    )
+
+
+def adicionar_delete_recast(bucket, *, finding_id="recast-clock", deleted_at):
+    bucket.adicionar(
+        "FINDING_ENRICHED_ATTRIBUTES",
+        envelope(
+            "FINDING_ENRICHED_ATTRIBUTES",
+            [],
+            [{"id": finding_id, "deleted_at": deleted_at}],
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +716,208 @@ def test_plugin_vai_para_tabela_separada_e_nao_repete(ingestor, conn):
         linhas = cur.fetchall()
     assert {l["plugin_id"] for l in linhas} == {14272}
     assert all(l["plugin_name"] for l in linhas), "plugin_name é denormalizado"
+
+
+# ---------------------------------------------------------------------------
+# Relogios monotônicos de plugin e recast
+# ---------------------------------------------------------------------------
+def test_plugin_rejeita_antigo_e_empate_mas_aceita_estritamente_novo(ingestor, conn):
+    bucket = Bucket()
+    adicionar_plugin(
+        bucket, indexed="2026-08-27T12:00:00Z", solution="solucao atual"
+    )
+    ciclo(ingestor, bucket, "SEED")
+    inicial = plugin(conn)
+
+    adicionar_plugin(
+        bucket, indexed="2026-08-27T11:00:00Z", solution="solucao antiga"
+    )
+    ciclo(ingestor, bucket, "SEED")
+    apos_antigo = plugin(conn)
+
+    adicionar_plugin(
+        bucket, indexed="2026-08-27T12:00:00Z", solution="solucao empatada"
+    )
+    ciclo(ingestor, bucket, "SEED")
+    apos_empate = plugin(conn)
+
+    assert apos_antigo["solution"] == "solucao atual"
+    assert apos_empate["solution"] == "solucao atual"
+    assert apos_empate["source_indexed"] == dt.datetime(
+        2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc
+    )
+    assert apos_antigo["updated_at"] == inicial["updated_at"]
+    assert apos_empate["updated_at"] == inicial["updated_at"]
+
+    adicionar_plugin(
+        bucket, indexed="2026-08-27T13:00:00Z", solution="solucao nova"
+    )
+    ciclo(ingestor, bucket, "SEED")
+    apos_novo = plugin(conn)
+
+    assert apos_novo["solution"] == "solucao nova"
+    assert apos_novo["source_indexed"] == dt.datetime(
+        2026, 8, 27, 13, 0, tzinfo=dt.timezone.utc
+    )
+    assert apos_novo["updated_at"] != inicial["updated_at"]
+
+
+def test_recast_rejeita_update_antigo_e_empate_sem_mover_ingested_at(ingestor, conn):
+    bucket = Bucket()
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T12:00:00Z", rule_comment="regra atual"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    inicial = recast(conn, "recast-clock")
+
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T11:00:00Z", rule_comment="regra antiga"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T12:00:00Z", rule_comment="regra empatada"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    final = recast(conn, "recast-clock")
+
+    assert final["rule_comment"] == "regra atual"
+    assert final["source_indexed"] == dt.datetime(
+        2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc
+    )
+    assert final["ingested_at"] == inicial["ingested_at"]
+
+
+def test_recast_delete_antigo_nao_apaga_mas_delete_novo_apaga(ingestor, conn):
+    bucket = Bucket()
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T12:00:00Z", rule_comment="regra atual"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+
+    adicionar_delete_recast(bucket, deleted_at="2026-08-27T11:00:00Z")
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    apos_antigo = recast(conn, "recast-clock")
+
+    assert apos_antigo["deleted_at"] is None
+    assert apos_antigo["rule_comment"] == "regra atual"
+
+    adicionar_delete_recast(bucket, deleted_at="2026-08-27T13:00:00Z")
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    apos_novo = recast(conn, "recast-clock")
+
+    esperado = dt.datetime(2026, 8, 27, 13, 0, tzinfo=dt.timezone.utc)
+    assert apos_novo["deleted_at"] == esperado
+    assert apos_novo["source_indexed"] == esperado
+    assert apos_novo["rule_comment"] == "regra atual"
+
+
+def test_recast_tombstone_so_ressuscita_com_update_estritamente_novo(ingestor, conn):
+    bucket = Bucket()
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T12:00:00Z", rule_comment="regra inicial"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    adicionar_delete_recast(bucket, deleted_at="2026-08-27T13:00:00Z")
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    tombstone = recast(conn, "recast-clock")
+
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T13:00:00Z", rule_comment="empate"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    empatado = recast(conn, "recast-clock")
+
+    assert empatado["deleted_at"] == tombstone["deleted_at"]
+    assert empatado["rule_comment"] == "regra inicial"
+    assert empatado["ingested_at"] == tombstone["ingested_at"]
+
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T14:00:00Z", rule_comment="ressuscitada"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    ressuscitado = recast(conn, "recast-clock")
+
+    assert ressuscitado["deleted_at"] is None
+    assert ressuscitado["rule_comment"] == "ressuscitada"
+    assert ressuscitado["source_indexed"] == dt.datetime(
+        2026, 8, 27, 14, 0, tzinfo=dt.timezone.utc
+    )
+
+
+def test_replay_do_mesmo_delete_recast_preserva_tombstone_e_ingested_at(ingestor, conn):
+    bucket = Bucket()
+    adicionar_recast(
+        bucket, updated_at="2026-08-27T12:00:00Z", rule_comment="regra inicial"
+    )
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    adicionar_delete_recast(bucket, deleted_at="2026-08-27T13:00:00Z")
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    primeiro = recast(conn, "recast-clock")
+
+    adicionar_delete_recast(bucket, deleted_at="2026-08-27T13:00:00Z")
+    ciclo(ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",))
+    replay = recast(conn, "recast-clock")
+
+    esperado = dt.datetime(2026, 8, 27, 13, 0, tzinfo=dt.timezone.utc)
+    assert replay["deleted_at"] == esperado
+    assert replay["source_indexed"] == esperado
+    assert replay["ingested_at"] == primeiro["ingested_at"]
+
+
+def test_delete_enriched_desconhecido_nao_inventa_tombstone(ingestor, conn):
+    bucket = Bucket()
+    adicionar_delete_recast(
+        bucket, finding_id="atributo-sem-vinculo", deleted_at="2026-08-27T13:00:00Z"
+    )
+    resultado = ciclo(
+        ingestor, bucket, "SEED", tipos=("FINDING_ENRICHED_ATTRIBUTES",)
+    )
+
+    assert resultado.payloads_ok == 1
+    assert recast(conn, "atributo-sem-vinculo") is None
+
+
+class _RollbackMigrationTest(Exception):
+    pass
+
+
+def test_migracao_backfill_recast_sem_inventar_relogio_de_plugin(conn):
+    """Executa a migracao sobre linhas no formato legado e desfaz ao final."""
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute("ALTER TABLE plugin DROP COLUMN IF EXISTS source_indexed")
+            cur.execute("ALTER TABLE finding_recast DROP COLUMN IF EXISTS source_indexed")
+            cur.execute("INSERT INTO plugin (plugin_id, raw) VALUES (999, '{}'::jsonb)")
+            cur.execute(
+                "INSERT INTO finding_recast "
+                "(finding_id, rule_created_at, rule_updated_at, deleted_at, raw) VALUES "
+                "('por-delete', '2026-08-27T10:00:00Z', '2026-08-27T11:00:00Z', "
+                " '2026-08-27T12:00:00Z', '{}'::jsonb), "
+                "('por-update', '2026-08-27T10:00:00Z', '2026-08-27T11:00:00Z', "
+                " NULL, '{}'::jsonb), "
+                "('por-create', '2026-08-27T10:00:00Z', NULL, NULL, '{}'::jsonb), "
+                "('sem-relogio', NULL, NULL, NULL, '{}'::jsonb)"
+            )
+            sql = (
+                RAIZ / "migrations" / "sql" / "0003_source_clocks.sql"
+            ).read_text(encoding="utf-8")
+            cur.execute(sql)
+
+            cur.execute("SELECT source_indexed FROM plugin WHERE plugin_id = 999")
+            assert cur.fetchone()["source_indexed"] is None
+            cur.execute(
+                "SELECT finding_id, source_indexed FROM finding_recast ORDER BY finding_id"
+            )
+            relogios = {row["finding_id"]: row["source_indexed"] for row in cur.fetchall()}
+            assert relogios == {
+                "por-create": dt.datetime(2026, 8, 27, 10, 0, tzinfo=dt.timezone.utc),
+                "por-delete": dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc),
+                "por-update": dt.datetime(2026, 8, 27, 11, 0, tzinfo=dt.timezone.utc),
+                "sem-relogio": None,
+            }
+            raise _RollbackMigrationTest
+    except _RollbackMigrationTest:
+        pass
 
 
 # ---------------------------------------------------------------------------

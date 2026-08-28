@@ -37,6 +37,12 @@ def _url() -> str:
     dsn = os.getenv("PG_DSN")
     if not dsn:
         raise RuntimeError("PG_DSN não definido — o Alembic precisa dele para conectar")
+    if dsn.startswith("postgresql://"):
+        # SQLAlchemy usa psycopg2 por padrão para `postgresql://`, mas este
+        # projeto instala e usa psycopg v3 em todos os caminhos.
+        return "postgresql+psycopg://" + dsn.removeprefix("postgresql://")
+    if dsn.startswith("postgres://"):
+        return "postgresql+psycopg://" + dsn.removeprefix("postgres://")
     if "://" in dsn:
         return dsn
     # DSN em formato libpq ("host=... dbname=...") → URL do SQLAlchemy

@@ -14,16 +14,12 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import hashlib
-import logging
 from dataclasses import dataclass, field, fields
 from typing import Any, Iterable, Mapping
 
 from .config import PRODUTO_VM, PRODUTO_WAS, TipoPayload
 from .erros import ErroParse
 from .manifest import EntradaPayload
-
-log = logging.getLogger(__name__)
-
 
 # ===========================================================================
 # Normalização de valores  (armadilhas reais da seção 7.5)
@@ -306,6 +302,7 @@ class LinhaRecast:
     changed_result: str | None = None
     rule_created_at: dt.datetime | None = None
     rule_updated_at: dt.datetime | None = None
+    source_indexed: dt.datetime | None = None
     deleted_at: dt.datetime | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -465,12 +462,18 @@ def _achatar_was(
     url = texto(registro.get("url"))
     input_name = texto(registro.get("input_name"))
 
+    state = maiusculo(registro.get("state"))
+    if state == "ACTIVE":
+        # A documentação do stream lista ACTIVE, mas declara que o estado
+        # equivalente da API é OPEN. O valor literal continua preservado em raw.
+        state = "OPEN"
+
     return LinhaFinding(
         seq=seq,
         finding_id=finding_id,
         product=PRODUTO_WAS,
         is_delete=False,
-        state=maiusculo(registro.get("state")),
+        state=state,
         severity=maiusculo(registro.get("severity")),
         severity_id=inteiro(registro.get("severity_id")),
         severity_default_id=inteiro(registro.get("severity_default_id")),
@@ -518,7 +521,7 @@ def _achatar_delete(
 
     Isto NÃO é remediação: é o finding sumindo do Tenable (asset removido,
     purge, licença). O `state` não vira FIXED (seção 6.7)."""
-    finding_id = texto(registro.get(tipo.campo_id_delete)) or texto(registro.get("id"))
+    finding_id = _id_delete(registro, tipo)
     if not finding_id:
         raise ErroParse(
             f"delete de {tipo.nome} sem '{tipo.campo_id_delete}': {sorted(registro)}"
@@ -604,9 +607,15 @@ def _achatar_enriched(
         propriedades = registro.get("recast_properties") or {}
         finding_id = texto(propriedades.get("finding_id"))
         if not finding_id:
-            log.debug("enriched sem finding_id em updates[%d]; ignorado", seq)
-            continue
+            raise ErroParse(f"enriched: update[{seq}] sem finding_id")
         anotacao = propriedades.get("recast_annotation") or {}
+        rule_created_at = timestamp(anotacao.get("created_at"))
+        rule_updated_at = timestamp(anotacao.get("updated_at"))
+        source_indexed = rule_updated_at or rule_created_at or fallback
+        if source_indexed is None:
+            raise ErroParse(
+                f"enriched: update[{seq}] do finding {finding_id} sem relógio de origem"
+            )
         resultado.recasts.append(
             LinhaRecast(
                 seq=seq,
@@ -619,8 +628,9 @@ def _achatar_enriched(
                 modification_target=maiusculo(anotacao.get("modification_target")),
                 recasted_severity=maiusculo(anotacao.get("recasted_severity")),
                 changed_result=texto(anotacao.get("changed_result")),
-                rule_created_at=timestamp(anotacao.get("created_at")),
-                rule_updated_at=timestamp(anotacao.get("updated_at")),
+                rule_created_at=rule_created_at,
+                rule_updated_at=rule_updated_at,
+                source_indexed=source_indexed,
                 raw=registro,
             )
         )
@@ -629,24 +639,33 @@ def _achatar_enriched(
     for posicao, registro in enumerate(deletes):
         if not isinstance(registro, dict):
             raise ErroParse(f"enriched: deletes[{posicao}] não é um objeto")
-        propriedades = registro.get("recast_properties") or {}
-        finding_id = (
-            texto(registro.get(tipo.campo_id_delete))
-            or texto(registro.get("id"))
-            or texto(propriedades.get("finding_id"))
-        )
+        finding_id = _id_delete(registro, tipo)
         if not finding_id:
-            log.warning("enriched: delete sem id (%s); ignorado", sorted(registro))
-            continue
+            raise ErroParse(f"enriched: delete[{posicao}] sem id: {sorted(registro)}")
+        deleted_at = timestamp(registro.get("deleted_at")) or fallback
+        if deleted_at is None:
+            raise ErroParse(
+                f"enriched: delete[{posicao}] do atributo {finding_id} sem relógio de origem"
+            )
         resultado.recasts.append(
             LinhaRecast(
                 seq=deslocamento + posicao,
                 finding_id=finding_id,
                 is_delete=True,
-                deleted_at=timestamp(registro.get("deleted_at")) or fallback,
+                source_indexed=deleted_at,
+                deleted_at=deleted_at,
                 raw=registro,
             )
         )
+
+
+def _id_delete(registro: Mapping[str, Any], tipo: TipoPayload) -> str | None:
+    """Resolve a identidade na ordem declarada pela configuração do tipo."""
+    for campo in (tipo.campo_id_delete, *tipo.campos_id_delete_fallback):
+        encontrado = texto(registro.get(campo))
+        if encontrado:
+            return encontrado
+    return None
 
 
 def _inteiro_ou_none(valor: Any) -> int | None:

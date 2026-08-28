@@ -14,7 +14,7 @@ INSERT INTO plugin AS p (
     exploit_available, exploited_by_malware, in_the_news, has_patch,
     unsupported_by_vendor,
     publication_date, patch_publication_date, modification_date,
-    raw, updated_at
+    source_indexed, raw, updated_at
 )
 SELECT DISTINCT ON (plugin_id)
        plugin_id, name, family, risk_factor, type, synopsis, description, solution,
@@ -23,7 +23,7 @@ SELECT DISTINCT ON (plugin_id)
        exploit_available, exploited_by_malware, in_the_news, has_patch,
        unsupported_by_vendor,
        publication_date, patch_publication_date, modification_date,
-       raw, now()
+       indexed, raw, now()
 FROM   stg_plugin
 WHERE  plugin_id IS NOT NULL
 ORDER  BY plugin_id, indexed DESC NULLS LAST, seq DESC
@@ -52,8 +52,10 @@ ON CONFLICT (plugin_id) DO UPDATE SET
     publication_date       = EXCLUDED.publication_date,
     patch_publication_date = EXCLUDED.patch_publication_date,
     modification_date      = EXCLUDED.modification_date,
+    source_indexed         = EXCLUDED.source_indexed,
     raw                    = EXCLUDED.raw,
     updated_at             = now()
--- Reprocessar o mesmo arquivo não deve mexer em `updated_at`: sem esta guarda,
--- o teste de idempotência da seção 10.1 acusaria diferença de estado.
-WHERE  p.raw IS DISTINCT FROM EXCLUDED.raw;
+-- Plugin legado não tem relógio confiável e aceita o primeiro registro.
+-- Depois disso, empate é replay e não move dados nem `updated_at`.
+WHERE  p.source_indexed IS NULL
+    OR EXCLUDED.source_indexed > p.source_indexed;

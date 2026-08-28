@@ -33,10 +33,9 @@ PRODUTO_WAS = "WAS"
 class TipoPayload:
     """Um dos três tipos que o sistema processa.
 
-    `campo_id_delete` existe porque o nome do campo de ID em `deletes[]` varia
-    por tipo (seção 4.4): finding usa `_id` (com underscore), asset usa `id`.
-    Um parser genérico que assuma `id` perde todos os deletes de finding em
-    silêncio."""
+    `campo_id_delete` é o nome oficial do campo em `deletes[]`; os fallbacks
+    são compatibilidade explícita com formatos já observados. A preferência
+    fica fixa por tipo para uma divergência do produtor nunca ser silenciosa."""
 
     nome: str
     diretorio_payload: str
@@ -44,6 +43,7 @@ class TipoPayload:
     tipo_manifest: str
     produto: str | None          # None para o stream enriched (cobre VM e WAS)
     campo_id_delete: str
+    campos_id_delete_fallback: tuple[str, ...] = ()
 
 
 TIPOS_PAYLOAD: Mapping[str, TipoPayload] = {
@@ -56,6 +56,7 @@ TIPOS_PAYLOAD: Mapping[str, TipoPayload] = {
             tipo_manifest="MANIFEST_FINDING",
             produto=PRODUTO_VM,
             campo_id_delete="_id",
+            campos_id_delete_fallback=("id",),
         ),
         TipoPayload(
             nome="WAS_FINDING",
@@ -63,7 +64,8 @@ TIPOS_PAYLOAD: Mapping[str, TipoPayload] = {
             diretorio_manifest="manifest_was_finding",
             tipo_manifest="MANIFEST_WAS_FINDING",
             produto=PRODUTO_WAS,
-            campo_id_delete="_id",
+            campo_id_delete="id",
+            campos_id_delete_fallback=("_id",),
         ),
         TipoPayload(
             nome="FINDING_ENRICHED_ATTRIBUTES",
@@ -71,7 +73,8 @@ TIPOS_PAYLOAD: Mapping[str, TipoPayload] = {
             diretorio_manifest="manifest_finding_enriched_attributes",
             tipo_manifest="MANIFEST_FINDING_ENRICHED_ATTRIBUTES",
             produto=None,
-            campo_id_delete="_id",
+            campo_id_delete="id",
+            campos_id_delete_fallback=("_id",),
         ),
     )
 }

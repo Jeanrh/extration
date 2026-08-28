@@ -101,6 +101,13 @@ def test_reprocessar_tudo_produz_estado_identico(ingestor, conn, modo):
     assert antes["finding_event_count"] == (9 if modo == "INCREMENTAL" else 0)
     assert antes["plugin_count"] == 2
     assert antes["finding_recast_count"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS total FROM plugin WHERE source_indexed IS NULL")
+        assert cur.fetchone()["total"] == 0
+        cur.execute(
+            "SELECT count(*) AS total FROM finding_recast WHERE source_indexed IS NULL"
+        )
+        assert cur.fetchone()["total"] == 0
     for chave in (
         "finding_current_hash",
         "finding_event_hash",

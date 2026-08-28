@@ -178,6 +178,14 @@ def test_was_indexed_at_vira_indexed():
     assert (linha.indexed - linha.last_found).total_seconds() == pytest.approx(7200, abs=60)
 
 
+def test_was_active_vira_open_sem_alterar_o_raw():
+    """A documentação lista ACTIVE, mas define seu estado de API como OPEN."""
+    linha = _um(WAS, [finding_was(state="ACTIVE")]).findings[0]
+
+    assert linha.state == "OPEN"
+    assert linha.raw["state"] == "ACTIVE"
+
+
 # ---------------------------------------------------------------------------
 # Plugin (seção 7.4)
 # ---------------------------------------------------------------------------
@@ -234,6 +242,31 @@ def test_delete_de_finding_usa_underscore_id():
     assert linha.indexed == ENTRADA.last_record_timestamp
 
 
+def test_delete_de_was_prefere_id_oficial_ao_fallback_legado():
+    linha = _um(
+        WAS,
+        [],
+        [{
+            "id": "was-oficial",
+            "_id": "was-legado",
+            "deleted_at": "2026-08-27T11:00:00Z",
+        }],
+    ).findings[0]
+
+    assert linha.finding_id == "was-oficial"
+    assert linha.product == "WAS"
+
+
+def test_delete_de_was_aceita_underscore_id_como_fallback():
+    linha = _um(
+        WAS,
+        [],
+        [{"_id": "was-legado", "deleted_at": "2026-08-27T11:00:00Z"}],
+    ).findings[0]
+
+    assert linha.finding_id == "was-legado"
+
+
 def test_delete_sem_id_reconhecivel_falha():
     with pytest.raises(ErroParse, match="_id"):
         _um(VM, [], [{"deleted_at": "2026-08-27T11:00:00Z"}])
@@ -263,12 +296,100 @@ def test_enriched_mapeia_recast():
     assert recast.recasted_severity == "NONE"
     assert recast.is_delete is False
     assert recast.rule_updated_at.year == 2026
+    assert recast.source_indexed == recast.rule_updated_at
 
 
-def test_enriched_sem_finding_id_e_ignorado_sem_quebrar():
-    achatado = _um(ENRICHED, [{"recast_properties": {"source": "x"}}])
-    assert achatado.recasts == []
-    assert achatado.num_updates == 1, "o registro conta para a validação do manifest"
+def test_enriched_update_usa_created_at_quando_updated_at_falta():
+    recast = _um(
+        ENRICHED,
+        [enriched(updated_at=None, created_at="2026-08-26T09:00:00Z")],
+    ).recasts[0]
+
+    assert recast.source_indexed == dt.datetime(
+        2026, 8, 26, 9, 0, tzinfo=dt.timezone.utc
+    )
+
+
+def test_enriched_update_usa_manifest_como_ultimo_fallback_de_relogio():
+    recast = _um(
+        ENRICHED,
+        [enriched(updated_at=None, created_at=None)],
+    ).recasts[0]
+
+    assert recast.source_indexed == ENTRADA.last_record_timestamp
+
+
+def test_enriched_update_sem_finding_id_falha_alto():
+    with pytest.raises(ErroParse, match="enriched.*finding_id"):
+        _um(ENRICHED, [{"recast_properties": {"source": "x"}}])
+
+
+def test_enriched_update_sem_relogio_falha_alto():
+    sem_relogio = EntradaPayload(
+        path="enriched-sem-relogio",
+        md5=None,
+        version=1,
+        num_updates=None,
+        num_deletes=None,
+        first_record_timestamp=None,
+        last_record_timestamp=None,
+        scan_id=None,
+    )
+
+    with pytest.raises(ErroParse, match="enriched.*relógio"):
+        _um(
+            ENRICHED,
+            [enriched(updated_at=None, created_at=None)],
+            entrada=sem_relogio,
+        )
+
+
+def test_enriched_delete_prefere_id_oficial_e_usa_deleted_at_como_relogio():
+    recast = _um(
+        ENRICHED,
+        [],
+        [{
+            "id": "atributo-oficial",
+            "_id": "atributo-legado",
+            "deleted_at": "2026-08-27T11:00:00Z",
+        }],
+    ).recasts[0]
+
+    esperado = dt.datetime(2026, 8, 27, 11, 0, tzinfo=dt.timezone.utc)
+    assert recast.finding_id == "atributo-oficial"
+    assert recast.deleted_at == esperado
+    assert recast.source_indexed == esperado
+
+
+def test_enriched_delete_aceita_underscore_id_como_fallback():
+    recast = _um(
+        ENRICHED,
+        [],
+        [{"_id": "atributo-legado", "deleted_at": "2026-08-27T11:00:00Z"}],
+    ).recasts[0]
+
+    assert recast.finding_id == "atributo-legado"
+
+
+def test_enriched_delete_sem_identidade_falha_alto():
+    with pytest.raises(ErroParse, match="enriched.*delete.*id"):
+        _um(ENRICHED, [], [{"deleted_at": "2026-08-27T11:00:00Z"}])
+
+
+def test_enriched_delete_sem_relogio_falha_alto():
+    sem_relogio = EntradaPayload(
+        path="enriched-delete-sem-relogio",
+        md5=None,
+        version=1,
+        num_updates=None,
+        num_deletes=None,
+        first_record_timestamp=None,
+        last_record_timestamp=None,
+        scan_id=None,
+    )
+
+    with pytest.raises(ErroParse, match="enriched.*relógio"):
+        _um(ENRICHED, [], [{"id": "atributo"}], entrada=sem_relogio)
 
 
 # ---------------------------------------------------------------------------
