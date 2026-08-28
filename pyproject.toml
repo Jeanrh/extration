@@ -9,3 +9,10 @@ requires-python = ">=3.11"
 
 [project.scripts]
 tenable-ingestion = "ingestion.cli:main"
+
+[tool.setuptools]
+packages = ["ingestion"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+ingestion = ["sql/*.sql"]

@@ -11,6 +11,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+if ($Port -eq 5432) {
+    throw "Port 5432 is reserved for the existing PostgreSQL service; choose a disposable test port."
+}
+
 function Test-DisposableClusterPath {
     param([Parameter(Mandatory)][string]$Candidate)
 
@@ -63,20 +67,20 @@ $python = if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
     (Get-Command python -ErrorAction Stop).Source
 }
 
-$serverStarted = $false
+$serverStartAttempted = $false
 $postgresPid = $null
 
 try {
     Write-Host "Creating disposable PostgreSQL cluster: $clusterPath"
     Invoke-Postgres $initdb @("--auth=trust", "--encoding=UTF8", "--username=postgres", "--pgdata=$clusterPath")
 
+    $serverStartAttempted = $true
     Invoke-Postgres $pgCtl @(
         "-D", $clusterPath,
         "-l", (Join-Path $clusterPath "postgresql.log"),
         "-o", "-h 127.0.0.1 -p $Port",
         "-w", "start"
     )
-    $serverStarted = $true
     $postgresPid = [int](Get-Content -LiteralPath (Join-Path $clusterPath "postmaster.pid") -TotalCount 1)
     Write-Host "Temporary PostgreSQL PID: $postgresPid"
 
@@ -89,10 +93,22 @@ try {
     }
 }
 finally {
-    if ($serverStarted) {
-        Invoke-Postgres $pgCtl @("-D", $clusterPath, "-m", "fast", "-w", "stop")
+    if ($serverStartAttempted) {
+        $pidFile = Join-Path $clusterPath "postmaster.pid"
+        if ($null -eq $postgresPid -and (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+            $postgresPid = [int](Get-Content -LiteralPath $pidFile -TotalCount 1)
+        }
+
+        & $pgCtl -D $clusterPath status
+        $statusExitCode = $LASTEXITCODE
+        & $pgCtl -D $clusterPath -m fast -w stop
+        $stopExitCode = $LASTEXITCODE
+
         if ($null -ne $postgresPid -and (Get-Process -Id $postgresPid -ErrorAction SilentlyContinue)) {
-            throw "Temporary PostgreSQL PID $postgresPid is still running after pg_ctl stop"
+            throw "Temporary PostgreSQL PID $postgresPid is still running after pg_ctl stop; refusing cleanup."
+        }
+        if ($statusExitCode -eq 0 -and $stopExitCode -ne 0) {
+            throw "pg_ctl reported a running temporary server but stop failed ($stopExitCode); refusing cleanup."
         }
     }
 
