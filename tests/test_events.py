@@ -151,6 +151,30 @@ def test_payload_com_type_de_outro_stream_entra_no_ledger_de_falha(ingestor, con
     assert linha["scan_id"] == "scan-misrouted"
 
 
+def test_timestamp_decimal_longo_retenta_e_quarentena_como_conteudo(
+    ingestor, conn
+):
+    bucket = Bucket()
+    doc = envelope("FINDING", [finding_vm(finding_id="timestamp-invalido")])
+    doc["first_ts"] = "9" * 5_000
+    doc["last_ts"] = doc["first_ts"]
+    bucket.adicionar("FINDING", doc)
+    bucket.fechar_manifest("FINDING")
+    ing = ingestor(bucket.store)
+
+    resultados = [ing.executar(modo="INCREMENTAL") for _ in range(3)]
+
+    assert [r.payloads_falhos for r in resultados] == [1, 1, 0]
+    assert [r.payloads_quarentena for r in resultados] == [0, 0, 1]
+    with conn.cursor() as cur:
+        cur.execute("SELECT status, attempt_count, error_message FROM ingest_file")
+        linha = cur.fetchone()
+    assert linha["status"] == "QUARANTINED"
+    assert linha["attempt_count"] == 3
+    assert linha["error_message"].startswith("ErroIntegridade:")
+    assert estado(conn, "timestamp-invalido") is None
+
+
 def test_processar_payload_nao_materializa_json(monkeypatch, ingestor, conn):
     bucket = Bucket()
     bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))

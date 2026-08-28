@@ -54,6 +54,88 @@ def _um(tipo, updates=None, deletes=None, entrada=ENTRADA):
     return achatar_payload(tipo, doc, entrada)
 
 
+def test_adaptador_de_registro_tem_interface_uniforme_para_os_tres_payload_types():
+    from ingestion.payload import achatar_registro
+
+    relogio = dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc)
+    casos = [
+        (
+            VM,
+            finding_vm(finding_id="vm-interface", indexed="2026-08-27T12:00:00Z"),
+            False,
+            ("vm-interface", "OPEN", 14272, None, relogio),
+        ),
+        (
+            WAS,
+            finding_was(
+                finding_id="was-interface",
+                state="ACTIVE",
+                indexed_at="2026-08-27T12:00:00Z",
+            ),
+            False,
+            ("was-interface", "OPEN", 114966, None, relogio),
+        ),
+        (
+            VM,
+            {"_id": "vm-oficial", "id": "vm-fallback"},
+            True,
+            ("vm-oficial", None, None, None, ENTRADA.last_record_timestamp),
+        ),
+        (
+            WAS,
+            {"id": "was-oficial", "_id": "was-fallback"},
+            True,
+            ("was-oficial", None, None, None, ENTRADA.last_record_timestamp),
+        ),
+        (
+            ENRICHED,
+            enriched(
+                finding_id="recast-interface",
+                updated_at="2026-08-27T12:00:00Z",
+            ),
+            False,
+            (None, None, None, "recast-interface", relogio),
+        ),
+        (
+            ENRICHED,
+            {
+                "id": "recast-delete-oficial",
+                "_id": "recast-delete-fallback",
+                "deleted_at": "2026-08-27T12:00:00Z",
+            },
+            True,
+            (None, None, None, "recast-delete-oficial", relogio),
+        ),
+    ]
+
+    for seq, (tipo, registro, is_delete, esperado) in enumerate(casos, start=10):
+        finding = achatar_registro(
+            tipo, registro, is_delete=is_delete, seq=seq, entrada=ENTRADA,
+            destino="finding",
+        )
+        plugin = achatar_registro(
+            tipo, registro, is_delete=is_delete, seq=seq, entrada=ENTRADA,
+            destino="plugin",
+        )
+        recast = achatar_registro(
+            tipo, registro, is_delete=is_delete, seq=seq, entrada=ENTRADA,
+            destino="recast",
+        )
+        observado = (
+            finding.finding_id if finding else None,
+            finding.state if finding else None,
+            plugin.plugin_id if plugin else None,
+            recast.finding_id if recast else None,
+            (
+                recast.source_indexed
+                if recast
+                else plugin.indexed if plugin else finding.indexed if finding else None
+            ),
+        )
+        assert observado == esperado
+        assert (finding or plugin or recast).seq == seq
+
+
 # ---------------------------------------------------------------------------
 # Normalizadores
 # ---------------------------------------------------------------------------

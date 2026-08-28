@@ -15,18 +15,14 @@ from typing import Any, Iterator, Mapping
 
 import ijson
 
-from .config import PRODUTO_VM, TipoPayload
+from .config import TipoPayload
 from .erros import ErroIntegridade, ErroParse
 from .manifest import EntradaPayload
 from .payload import (
     LinhaFinding,
     LinhaPlugin,
     LinhaRecast,
-    _achatar_delete,
-    _achatar_plugin,
-    _achatar_vm,
-    _achatar_was,
-    achatar_registro_enriched,
+    achatar_registro,
 )
 
 _ESCALARES = {
@@ -240,82 +236,52 @@ class PayloadStream:
                 f"gzip/JSON inválido em {self.entrada.path}: {erro}"
             ) from erro
 
-    def iter_findings(self) -> Iterator[LinhaFinding]:
-        if self.tipo.produto is None:
-            return
+    def _iter_linhas(self, destino: str) -> Iterator[Any]:
         self.num_updates_lidos = 0
         self.num_deletes_lidos = 0
-        self.findings_mapeados = 0
-        achatar = _achatar_vm if self.tipo.produto == PRODUTO_VM else _achatar_was
-        fallback = self.entrada.relogio_fallback
         for seq, registro in enumerate(self._itens("updates.item")):
             self.num_updates_lidos += 1
-            linha = achatar(seq, dict(registro), fallback)
-            if linha.indexed is None:
-                raise ErroParse(
-                    f"{self.entrada.path}: finding {linha.finding_id} sem relógio de versão"
-                )
-            self.findings_mapeados += 1
-            yield linha
-        for posicao, registro in enumerate(self._itens("deletes.item")):
-            self.num_deletes_lidos += 1
-            linha = _achatar_delete(
-                self.num_updates_lidos + posicao,
-                dict(registro),
-                self.tipo,
-                fallback,
-            )
-            self.findings_mapeados += 1
-            yield linha
-        self._contagem_percorrida = True
-
-    def iter_plugins(self) -> Iterator[LinhaPlugin]:
-        if self.tipo.produto is None:
-            return
-        self.plugins_mapeados = 0
-        achatar = _achatar_vm if self.tipo.produto == PRODUTO_VM else _achatar_was
-        fallback = self.entrada.relogio_fallback
-        for seq, registro in enumerate(self._itens("updates.item")):
-            linha_finding = achatar(seq, dict(registro), fallback)
-            if linha_finding.indexed is None:
-                raise ErroParse(
-                    f"{self.entrada.path}: finding {linha_finding.finding_id} sem relógio de versão"
-                )
-            plugin = _achatar_plugin(seq, registro.get("plugin"), linha_finding.indexed)
-            if plugin is not None:
-                self.plugins_mapeados += 1
-                yield plugin
-
-    def iter_recasts(self) -> Iterator[LinhaRecast]:
-        if self.tipo.produto is not None:
-            return
-        self.num_updates_lidos = 0
-        self.num_deletes_lidos = 0
-        self.recasts_mapeados = 0
-        fallback = self.entrada.relogio_fallback
-        for seq, registro in enumerate(self._itens("updates.item")):
-            self.num_updates_lidos += 1
-            linha = achatar_registro_enriched(
+            linha = achatar_registro(
                 self.tipo,
                 registro,
                 is_delete=False,
                 seq=seq,
-                fallback=fallback,
+                entrada=self.entrada,
+                destino=destino,
             )
-            self.recasts_mapeados += 1
-            yield linha
+            if linha is not None:
+                yield linha
         for posicao, registro in enumerate(self._itens("deletes.item")):
             self.num_deletes_lidos += 1
-            linha = achatar_registro_enriched(
+            linha = achatar_registro(
                 self.tipo,
                 registro,
                 is_delete=True,
                 seq=self.num_updates_lidos + posicao,
-                fallback=fallback,
+                entrada=self.entrada,
+                destino=destino,
             )
+            if linha is not None:
+                yield linha
+        self._contagem_percorrida = True
+
+    def iter_findings(self) -> Iterator[LinhaFinding]:
+        self.findings_mapeados = 0
+        for linha in self._iter_linhas("finding"):
+            self.findings_mapeados += 1
+            yield linha
+
+    def iter_plugins(self) -> Iterator[LinhaPlugin]:
+        self.plugins_mapeados = 0
+        for linha in self._iter_linhas("plugin"):
+            self.plugins_mapeados += 1
+            yield linha
+
+    def iter_recasts(self) -> Iterator[LinhaRecast]:
+        self.recasts_mapeados = 0
+        for linha in self._iter_linhas("recast"):
             self.recasts_mapeados += 1
             yield linha
-        self._contagem_percorrida = True
 
     def validar_contagens(self) -> None:
         if not self._contagem_percorrida:
@@ -354,7 +320,12 @@ def _epoch_ms(valor: Any, campo: str, path: str) -> int:
     if type(valor) is int:
         convertido = valor
     elif isinstance(valor, str) and _DECIMAL_INTEIRO.fullmatch(valor):
-        convertido = int(valor)
+        try:
+            convertido = int(valor)
+        except ValueError as erro:
+            raise ErroIntegridade(
+                f"{path}: {campo} deve ser inteiro ou string decimal válida"
+            ) from erro
     else:
         raise ErroIntegridade(
             f"{path}: {campo} deve ser inteiro ou string decimal"

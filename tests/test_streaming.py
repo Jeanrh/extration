@@ -261,6 +261,18 @@ def test_payload_stream_valida_timestamp_do_envelope_contra_manifest(
         PayloadStream(path, TIPOS_PAYLOAD["FINDING"], _entrada(path.name, dados))
 
 
+def test_timestamp_decimal_longo_demais_e_erro_de_integridade(tmp_path):
+    from ingestion.streaming import PayloadStream
+
+    doc = envelope("FINDING", [_finding()])
+    doc["first_ts"] = "9" * 5_000
+    doc["last_ts"] = doc["first_ts"]
+    path, dados = _arquivo(tmp_path, doc)
+
+    with pytest.raises(ErroIntegridade, match="first_ts.*string decimal"):
+        PayloadStream(path, TIPOS_PAYLOAD["FINDING"], _entrada(path.name, dados))
+
+
 def test_payload_vazio_pode_omitir_par_de_timestamps_quando_manifest_tambem_omite(
     tmp_path,
 ):

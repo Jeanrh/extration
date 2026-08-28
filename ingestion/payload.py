@@ -15,7 +15,7 @@ import datetime as dt
 import decimal
 import hashlib
 from dataclasses import dataclass, field, fields, replace
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 from .config import PRODUTO_VM, PRODUTO_WAS, TipoPayload
 from .erros import ErroParse
@@ -327,6 +327,10 @@ class PayloadAchatado:
         return self.num_updates + self.num_deletes
 
 
+DestinoAchatamento = Literal["finding", "plugin", "recast"]
+LinhaAchatada = LinhaFinding | LinhaPlugin | LinhaRecast
+
+
 # ===========================================================================
 # Achatamento por tipo
 # ===========================================================================
@@ -344,38 +348,60 @@ def achatar_payload(
         num_deletes=len(deletes),
         version=_inteiro_ou_none(doc.get("version")),
     )
-    fallback = entrada.relogio_fallback
-
-    if tipo.nome == "FINDING_ENRICHED_ATTRIBUTES":
-        _achatar_enriched(resultado, tipo, updates, deletes, fallback)
-        return resultado
-
-    achatar_um = _achatar_vm if tipo.produto == PRODUTO_VM else _achatar_was
     for seq, registro in enumerate(updates):
         if not isinstance(registro, dict):
             raise ErroParse(f"{entrada.path}: updates[{seq}] não é um objeto")
-        linha = achatar_um(seq, registro, fallback)
-        if linha.indexed is None:
-            # Sem relógio de versão não há como ordenar o registro contra o que
-            # já está no banco, e a guarda da seção 6.4 deixaria de proteger.
-            # Melhor o arquivo falhar alto e ir para a fila de tentativas do
-            # que entrar com a ordenação quebrada.
-            raise ErroParse(
-                f"{entrada.path}: finding {linha.finding_id} sem relógio de versão "
-                "(indexed/indexed_at nulos e manifest sem last_record_timestamp)"
-            )
-        resultado.findings.append(linha)
-        plugin = _achatar_plugin(seq, registro.get("plugin"), linha.indexed)
+        finding = achatar_registro(
+            tipo,
+            registro,
+            is_delete=False,
+            seq=seq,
+            entrada=entrada,
+            destino="finding",
+        )
+        plugin = achatar_registro(
+            tipo,
+            registro,
+            is_delete=False,
+            seq=seq,
+            entrada=entrada,
+            destino="plugin",
+        )
+        recast = achatar_registro(
+            tipo,
+            registro,
+            is_delete=False,
+            seq=seq,
+            entrada=entrada,
+            destino="recast",
+        )
+        if finding is not None:
+            resultado.findings.append(finding)
         if plugin is not None:
             resultado.plugins.append(plugin)
+        if recast is not None:
+            resultado.recasts.append(recast)
 
     deslocamento = len(updates)
     for posicao, registro in enumerate(deletes):
         if not isinstance(registro, dict):
             raise ErroParse(f"{entrada.path}: deletes[{posicao}] não é um objeto")
-        resultado.findings.append(
-            _achatar_delete(deslocamento + posicao, registro, tipo, fallback)
-        )
+        seq = deslocamento + posicao
+        for destino, linhas in (
+            ("finding", resultado.findings),
+            ("plugin", resultado.plugins),
+            ("recast", resultado.recasts),
+        ):
+            linha = achatar_registro(
+                tipo,
+                registro,
+                is_delete=True,
+                seq=seq,
+                entrada=entrada,
+                destino=destino,
+            )
+            if linha is not None:
+                linhas.append(linha)
 
     return resultado
 
@@ -659,25 +685,112 @@ def _achatar_enriched(
         )
 
 
-def achatar_registro_enriched(
+def _achatar_registro_finding(
+    achatador,
+    tipo: TipoPayload,
+    registro: Mapping[str, Any],
+    is_delete: bool,
+    seq: int,
+    entrada: EntradaPayload,
+    destino: DestinoAchatamento,
+) -> LinhaAchatada | None:
+    if is_delete:
+        if destino != "finding":
+            return None
+        return _achatar_delete(
+            seq, dict(registro), tipo, entrada.relogio_fallback
+        )
+    if destino == "recast":
+        return None
+
+    finding = achatador(seq, dict(registro), entrada.relogio_fallback)
+    if finding.indexed is None:
+        raise ErroParse(
+            f"{entrada.path}: finding {finding.finding_id} sem relógio de versão "
+            "(indexed/indexed_at nulos e manifest sem last_record_timestamp)"
+        )
+    if destino == "finding":
+        return finding
+    return _achatar_plugin(seq, registro.get("plugin"), finding.indexed)
+
+
+def _achatar_registro_vm(
+    tipo: TipoPayload,
+    registro: Mapping[str, Any],
+    is_delete: bool,
+    seq: int,
+    entrada: EntradaPayload,
+    destino: DestinoAchatamento,
+) -> LinhaAchatada | None:
+    return _achatar_registro_finding(
+        _achatar_vm, tipo, registro, is_delete, seq, entrada, destino
+    )
+
+
+def _achatar_registro_was(
+    tipo: TipoPayload,
+    registro: Mapping[str, Any],
+    is_delete: bool,
+    seq: int,
+    entrada: EntradaPayload,
+    destino: DestinoAchatamento,
+) -> LinhaAchatada | None:
+    return _achatar_registro_finding(
+        _achatar_was, tipo, registro, is_delete, seq, entrada, destino
+    )
+
+
+def _achatar_registro_enriched(
+    tipo: TipoPayload,
+    registro: Mapping[str, Any],
+    is_delete: bool,
+    seq: int,
+    entrada: EntradaPayload,
+    destino: DestinoAchatamento,
+) -> LinhaAchatada | None:
+    if destino != "recast":
+        return None
+
+    resultado = PayloadAchatado()
+    if is_delete:
+        _achatar_enriched(
+            resultado, tipo, [], [dict(registro)], entrada.relogio_fallback
+        )
+    else:
+        _achatar_enriched(
+            resultado, tipo, [dict(registro)], [], entrada.relogio_fallback
+        )
+    return replace(resultado.recasts[0], seq=seq)
+
+
+_ACHATADORES_REGISTRO = {
+    "FINDING": _achatar_registro_vm,
+    "WAS_FINDING": _achatar_registro_was,
+    "FINDING_ENRICHED_ATTRIBUTES": _achatar_registro_enriched,
+}
+
+
+def achatar_registro(
     tipo: TipoPayload,
     registro: Mapping[str, Any],
     *,
     is_delete: bool,
     seq: int,
-    fallback: dt.datetime | None,
-) -> LinhaRecast:
-    """Adaptador limitado a um item para o parser streaming.
+    entrada: EntradaPayload,
+    destino: DestinoAchatamento,
+) -> LinhaAchatada | None:
+    """Mapeia um item com uma assinatura uniforme para os três payload types.
 
-    ``_achatar_enriched`` permanece a fonte única do mapa; as listas abaixo
-    têm sempre zero ou um elemento e, portanto, não crescem com o payload.
+    Este é o único dispatch de formato usado tanto pelo parser legado quanto
+    pelo streaming. Consumidores escolhem apenas a linha de staging desejada.
     """
-    resultado = PayloadAchatado()
-    if is_delete:
-        _achatar_enriched(resultado, tipo, [], [dict(registro)], fallback)
-    else:
-        _achatar_enriched(resultado, tipo, [dict(registro)], [], fallback)
-    return replace(resultado.recasts[0], seq=seq)
+    if destino not in {"finding", "plugin", "recast"}:
+        raise ValueError(f"destino de achatamento inválido: {destino!r}")
+    try:
+        achatador = _ACHATADORES_REGISTRO[tipo.nome]
+    except KeyError as erro:
+        raise ValueError(f"payload type sem achatador: {tipo.nome!r}") from erro
+    return achatador(tipo, registro, is_delete, seq, entrada, destino)
 
 
 def _id_delete(registro: Mapping[str, Any], tipo: TipoPayload) -> str | None:
