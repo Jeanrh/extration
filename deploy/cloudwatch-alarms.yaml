@@ -16,7 +16,7 @@ Resources:
       MetricName: HoursSinceLastManifest
       Namespace: !Ref Namespace
       Statistic: Maximum
-      Period: 3600
+      Period: 86400
       EvaluationPeriods: 1
       Threshold: 6
       ComparisonOperator: GreaterThanThreshold
@@ -33,7 +33,7 @@ Resources:
       MetricName: FilesQuarantined
       Namespace: !Ref Namespace
       Statistic: Maximum
-      Period: 3600
+      Period: 86400
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
@@ -49,11 +49,11 @@ Resources:
       AlarmDescription: No ingestion job duration was published for 26 hours
       MetricName: JobDurationSeconds
       Namespace: !Ref Namespace
-      Statistic: Maximum
+      Statistic: SampleCount
       Period: 3600
       EvaluationPeriods: 26
       DatapointsToAlarm: 26
-      Threshold: 0
+      Threshold: 1
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
@@ -68,7 +68,7 @@ Resources:
       MetricName: FindingsOpenChangePercent
       Namespace: !Ref Namespace
       Statistic: Maximum
-      Period: 3600
+      Period: 86400
       EvaluationPeriods: 1
       Threshold: 20
       ComparisonOperator: GreaterThanThreshold

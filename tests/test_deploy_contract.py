@@ -372,24 +372,44 @@ def test_cloudformation_declares_exact_alarm_identities_and_actions():
         assert "Dimensions" not in properties
         assert "Unit" not in properties
 
-    stale = by_metric["HoursSinceLastManifest"]["Properties"]
-    assert stale["Threshold"] == int(EXPECTED_CONFIG["MANIFEST_STALE_HOURS"])
-    assert stale["ComparisonOperator"] == "GreaterThanThreshold"
-    assert stale["TreatMissingData"] == "breaching"
-
-    quarantined = by_metric["FilesQuarantined"]["Properties"]
-    assert quarantined["Threshold"] == 0
-    assert quarantined["ComparisonOperator"] == "GreaterThanThreshold"
-
-    missing_job = by_metric["JobDurationSeconds"]["Properties"]
-    assert missing_job["Period"] == 3600
-    assert missing_job["EvaluationPeriods"] == 26
-    assert missing_job["DatapointsToAlarm"] == 26
-    assert missing_job["TreatMissingData"] == "breaching"
-
-    findings_change = by_metric["FindingsOpenChangePercent"]["Properties"]
-    assert findings_change["Threshold"] == 20
-    assert findings_change["ComparisonOperator"] == "GreaterThanThreshold"
+    expected_evaluation = {
+        "HoursSinceLastManifest": {
+            "Statistic": "Maximum",
+            "Period": 86400,
+            "EvaluationPeriods": 1,
+            "Threshold": int(EXPECTED_CONFIG["MANIFEST_STALE_HOURS"]),
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "breaching",
+        },
+        "FilesQuarantined": {
+            "Statistic": "Maximum",
+            "Period": 86400,
+            "EvaluationPeriods": 1,
+            "Threshold": 0,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "notBreaching",
+        },
+        "JobDurationSeconds": {
+            "Statistic": "SampleCount",
+            "Period": 3600,
+            "EvaluationPeriods": 26,
+            "DatapointsToAlarm": 26,
+            "Threshold": 1,
+            "ComparisonOperator": "LessThanThreshold",
+            "TreatMissingData": "breaching",
+        },
+        "FindingsOpenChangePercent": {
+            "Statistic": "Maximum",
+            "Period": 86400,
+            "EvaluationPeriods": 1,
+            "Threshold": 20,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "notBreaching",
+        },
+    }
+    for metric_name, expected in expected_evaluation.items():
+        properties = by_metric[metric_name]["Properties"]
+        assert {key: properties[key] for key in expected} == expected
 
 
 def test_cloudformation_passes_installed_console_linter():
