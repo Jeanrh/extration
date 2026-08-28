@@ -73,12 +73,18 @@ def _instantaneo(conn) -> dict:
             "FROM plugin p"
         )
         checksum_plugin = cur.fetchone()["h"]
+        cur.execute(
+            "SELECT md5(coalesce(string_agg(r::text, '|' ORDER BY r.finding_id), '')) AS h "
+            "FROM finding_recast r"
+        )
+        checksum_recast = cur.fetchone()["h"]
     return {
         "findings": findings,
         "eventos": eventos,
         "estado": checksum_estado,
         "eventos_hash": checksum_eventos,
         "plugin": checksum_plugin,
+        "recast": checksum_recast,
     }
 
 

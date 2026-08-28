@@ -7,6 +7,8 @@ descartável; sem ela os testes são pulados.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
@@ -155,8 +157,12 @@ def test_regra2c_inedito_reopened_gera_opened_e_reopened(ingestor, conn):
 
     registros = eventos(conn, "f1")
     assert [e["event_type"] for e in registros] == ["OPENED", "REOPENED"]
-    assert registros[0]["occurred_at"].year == 2024
-    assert registros[1]["occurred_at"].day == 25
+    assert registros[0]["occurred_at"] == dt.datetime(
+        2024, 1, 1, tzinfo=dt.timezone.utc
+    )
+    assert registros[1]["occurred_at"] == dt.datetime(
+        2026, 8, 25, tzinfo=dt.timezone.utc
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +332,9 @@ def test_first_found_nunca_regride(ingestor, conn):
         indexed="2026-08-28T10:00:00Z")]))
     ciclo(ingestor, bucket, "INCREMENTAL")
 
-    assert estado(conn, "f1")["first_found"].year == 2020
+    assert estado(conn, "f1")["first_found"] == dt.datetime(
+        2020, 1, 1, tzinfo=dt.timezone.utc
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +357,120 @@ def test_abriu_e_fechou_no_mesmo_arquivo_preserva_o_par(ingestor, conn):
     linha = estado(conn, "f1")
     assert linha["state"] == "FIXED", "o upsert aplica só o último"
     assert linha["indexed"].minute == 15
+
+
+def test_existing_open_fixed_reopened_no_mesmo_payload(ingestor, conn):
+    """A timeline precisa comparar cada versão com a anterior no payload.
+
+    Se todas as linhas forem comparadas apenas com o baseline OPEN persistido,
+    a transição FIXED -> REOPENED desaparece.
+    """
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(
+        finding_id="f1", state="OPEN", indexed="2026-08-27T10:00:00Z")]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    bucket.adicionar("FINDING", envelope("FINDING", [
+        finding_vm(
+            finding_id="f1", state="FIXED",
+            last_fixed="2026-08-28T11:00:00Z",
+            indexed="2026-08-28T11:05:00Z",
+        ),
+        finding_vm(
+            finding_id="f1", state="REOPENED",
+            resurfaced_date="2026-08-28T12:00:00Z",
+            indexed="2026-08-28T12:05:00Z",
+        ),
+    ]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    assert tipos_de_evento(conn, "f1")[-2:] == ["FIXED", "REOPENED"]
+    assert estado(conn, "f1")["state"] == "REOPENED"
+
+
+def test_payload_antigo_nao_gera_evento_espurio(ingestor, conn):
+    """Uma versão anterior ao relógio persistido não pertence à timeline."""
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(
+        finding_id="f1", state="FIXED",
+        last_fixed="2026-08-27T09:00:00Z",
+        indexed="2026-08-27T10:00:00Z",
+    )]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+    antes = eventos(conn, "f1")
+
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(
+        finding_id="f1", state="OPEN", indexed="2020-01-01T10:00:00Z")]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    assert eventos(conn, "f1") == antes
+
+
+def test_delete_antigo_nao_apaga_update_novo(ingestor, conn):
+    """A posição no payload não pode fazer um tombstone antigo vencer."""
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(
+        finding_id="f1", indexed="2026-08-28T12:00:00Z")]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    bucket.adicionar(
+        "FINDING",
+        envelope("FINDING", [], [{"_id": "f1", "deleted_at": "2026-08-20T12:00:00Z"}]),
+    )
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    assert estado(conn, "f1")["deleted_at"] is None
+    assert "DELETED" not in tipos_de_evento(conn, "f1")
+
+
+def test_delete_aceito_avanca_relogio_e_update_empatado_nao_ressuscita(ingestor, conn):
+    """Sem avançar indexed, um replay empatado poderia limpar o tombstone."""
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(
+        finding_id="f1", state="OPEN", indexed="2026-08-27T10:00:00Z")]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    bucket.adicionar(
+        "FINDING",
+        envelope("FINDING", [], [{"_id": "f1", "deleted_at": "2026-08-28T12:00:00Z"}]),
+    )
+    ciclo(ingestor, bucket, "INCREMENTAL")
+    apagado = estado(conn, "f1")
+    assert apagado["state"] == "OPEN"
+    assert apagado["indexed"] == dt.datetime(
+        2026, 8, 28, 12, tzinfo=dt.timezone.utc
+    )
+
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(
+        finding_id="f1", state="REOPENED", indexed="2026-08-28T12:00:00Z")]))
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    empatado = estado(conn, "f1")
+    assert empatado["deleted_at"] is not None
+    assert empatado["state"] == "OPEN"
+
+
+def test_update_e_delete_empatados_no_mesmo_payload_aplicam_delete(ingestor, conn):
+    """O delete vem depois no staging e deve vencer o update de mesmo relógio."""
+    bucket = Bucket()
+    bucket.adicionar(
+        "FINDING",
+        envelope(
+            "FINDING",
+            [finding_vm(
+                finding_id="f1", state="OPEN",
+                first_found="2026-08-28T08:00:00Z",
+                indexed="2026-08-28T12:00:00Z",
+            )],
+            [{"_id": "f1", "deleted_at": "2026-08-28T12:00:00Z"}],
+        ),
+    )
+    ciclo(ingestor, bucket, "INCREMENTAL")
+
+    assert tipos_de_evento(conn, "f1") == ["OPENED", "DELETED"]
+    linha = estado(conn, "f1")
+    assert linha["deleted_at"] is not None
+    assert linha["state"] == "OPEN"
 
 
 def test_seed_deduplica_mantendo_o_maior_indexed(ingestor, conn):

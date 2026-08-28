@@ -15,6 +15,16 @@
 -- `last_found` NÃO serve de relógio: no WAS real ele fica horas atrás do
 -- `indexed_at` (10:19 vs 12:19 no payload de exemplo).
 
+-- Materializa a decisão enquanto o baseline anterior ainda está visível.
+-- O delete posterior reutiliza esta tabela para distinguir um update realmente
+-- aceito de um replay empatado que o ON CONFLICT descartou.
+CREATE TEMP TABLE stg_effective_finding_update ON COMMIT DROP AS
+SELECT s.*
+FROM stg_finding s
+LEFT JOIN finding_current c USING (finding_id)
+WHERE s.is_delete = false
+  AND (c.finding_id IS NULL OR s.indexed > c.indexed);
+
 INSERT INTO finding_current AS f (
     finding_id, product, state, severity, severity_id, severity_default_id,
     severity_modification_type, recast_reason, recast_rule_uuid,
@@ -41,8 +51,7 @@ SELECT finding_id, product, state, severity, severity_id, severity_default_id,
        time_taken_to_fix, indexed,
        scan_uuid, scan_schedule_uuid, scan_started_at, scan_completed_at,
        scan_target, source, natural_key, NULL, raw
-FROM   stg_finding
-WHERE  is_delete = false
+FROM   stg_effective_finding_update
 ON CONFLICT (finding_id) DO UPDATE SET
     state                      = EXCLUDED.state,
     severity                   = EXCLUDED.severity,

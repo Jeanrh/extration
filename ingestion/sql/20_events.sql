@@ -1,106 +1,129 @@
--- Motor de eventos (seção 8.4). Roda só em modo INCREMENTAL.
+-- Motor de eventos incremental sobre uma timeline versionada.
 --
--- Cada bloco é uma regra da tabela 8.2. São blocos separados com UNION ALL,
--- e NÃO um CASE único, de propósito: a regra 6 (RECAST_CHANGED) é independente
--- das demais e pode ocorrer junto com qualquer uma. Um CASE devolve um evento
--- por linha e perderia o segundo.
---
--- `occurred_at` sai sempre do dado (quando aconteceu de verdade); `detected_at`
--- é o now() do default da coluna (quando o pipeline soube). Relatório usa
--- occurred_at.
---
--- O ON CONFLICT DO NOTHING cai sobre ux_finding_event_dedup
--- (finding_id, event_type, occurred_at) — camada 4 da seção 10: reprocessar o
--- mesmo payload não duplica evento.
---
--- Este SQL roda ANTES do upsert de estado: os LEFT JOIN/JOIN contra
--- finding_current enxergam o estado anterior ao arquivo. É o diff, e ele vive
--- aqui, no índice, nunca em memória Python.
+-- O banco ainda contém o baseline anterior ao payload quando este SQL roda.
+-- Cada versão estritamente posterior ao relógio persistido participa da
+-- timeline em (indexed, seq); versões antigas ou empatadas são replay e não
+-- geram história. A mudança de recast é independente das transições de state.
 
+WITH updates_efetivos AS (
+    SELECT s.*,
+           c.state AS baseline_state,
+           c.severity_modification_type AS baseline_recast,
+           (c.finding_id IS NOT NULL) AS baseline_exists,
+           row_number() OVER w AS rn,
+           lag(s.state) OVER w AS lag_state,
+           lag(s.severity_modification_type) OVER w AS lag_recast
+    FROM stg_finding s
+    LEFT JOIN finding_current c USING (finding_id)
+    WHERE s.is_delete = false
+      AND (c.finding_id IS NULL OR s.indexed > c.indexed)
+    WINDOW w AS (PARTITION BY s.finding_id ORDER BY s.indexed, s.seq)
+), timeline AS (
+    SELECT *,
+           CASE WHEN rn = 1 THEN baseline_state ELSE lag_state END AS old_state,
+           CASE WHEN rn = 1 THEN baseline_recast ELSE lag_recast END AS old_recast
+    FROM updates_efetivos
+), ultimo_update_efetivo AS (
+    SELECT DISTINCT ON (finding_id) *
+    FROM timeline
+    ORDER BY finding_id, indexed DESC, seq DESC
+), ultimo_delete AS (
+    SELECT DISTINCT ON (finding_id)
+           s.*, COALESCE(s.deleted_at, s.indexed) AS delete_clock
+    FROM stg_finding s
+    WHERE s.is_delete = true
+      AND COALESCE(s.deleted_at, s.indexed) IS NOT NULL
+    ORDER BY finding_id, COALESCE(s.deleted_at, s.indexed) DESC, seq DESC
+), deletes_efetivos AS (
+    SELECT d.finding_id,
+           COALESCE(u.product, c.product, d.product) AS product,
+           d.delete_clock,
+           COALESCE(u.state, c.state) AS old_state
+    FROM ultimo_delete d
+    LEFT JOIN finding_current c USING (finding_id)
+    LEFT JOIN ultimo_update_efetivo u USING (finding_id)
+    WHERE
+        -- Um update efetivo no mesmo staging é o baseline lógico do delete.
+        -- Sem ele, o delete precisa ser estritamente posterior ao persistido.
+        (
+            u.finding_id IS NOT NULL
+            AND (
+                d.delete_clock > u.indexed
+                OR (d.delete_clock = u.indexed AND d.seq > u.seq)
+            )
+        )
+        OR (
+            u.finding_id IS NULL
+            AND c.finding_id IS NOT NULL
+            AND c.deleted_at IS NULL
+            AND d.delete_clock > c.indexed
+        )
+)
 INSERT INTO finding_event
     (finding_id, product, event_type, occurred_at, old_state, new_state,
      old_value, new_value, source_path, scan_id)
 
--- 1. inédito aberto
-SELECT s.finding_id, s.product, 'OPENED',
-       COALESCE(s.first_found, s.indexed), NULL, s.state,
-       NULL, to_jsonb(s.state), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-LEFT   JOIN finding_current c USING (finding_id)
-WHERE  c.finding_id IS NULL AND s.is_delete = false AND s.state <> 'FIXED'
+-- Finding inédito: toda primeira versão cria a abertura histórica.
+SELECT t.finding_id, t.product, 'OPENED',
+       COALESCE(t.first_found, t.indexed), NULL,
+       CASE WHEN t.state = 'FIXED' THEN 'OPEN' ELSE t.state END,
+       NULL::jsonb,
+       to_jsonb(CASE WHEN t.state = 'FIXED' THEN 'OPEN' ELSE t.state END),
+       %(source_path)s, %(scan_id)s
+FROM timeline t
+WHERE t.rn = 1 AND t.baseline_exists = false
 
 UNION ALL
--- 2a. inédito já fechado → OPENED retroativo (seção 8.3)
---     Sem isto o fechamento some da estatística: não gera OPENED (chegou
---     fechado) nem FIXED (não havia linha aberta antes). É este bloco que
---     exige a partição DEFAULT — um OPENED de 2019 não cabe nos meses recentes.
-SELECT s.finding_id, s.product, 'OPENED',
-       COALESCE(s.first_found, s.indexed), NULL, 'OPEN',
-       NULL, to_jsonb('OPEN'::text), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-LEFT   JOIN finding_current c USING (finding_id)
-WHERE  c.finding_id IS NULL AND s.is_delete = false
-  AND  s.state = 'FIXED' AND s.first_found IS NOT NULL
+-- Inédito já FIXED: completa o par OPENED + FIXED.
+SELECT t.finding_id, t.product, 'FIXED',
+       COALESCE(t.last_fixed, t.indexed), NULL, t.state,
+       NULL::jsonb, to_jsonb(t.state), %(source_path)s, %(scan_id)s
+FROM timeline t
+WHERE t.rn = 1 AND t.baseline_exists = false AND t.state = 'FIXED'
 
 UNION ALL
--- 2b. inédito já fechado → FIXED, com a data real do fechamento
-SELECT s.finding_id, s.product, 'FIXED',
-       COALESCE(s.last_fixed, s.indexed), NULL, s.state,
-       NULL, to_jsonb(s.state), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-LEFT   JOIN finding_current c USING (finding_id)
-WHERE  c.finding_id IS NULL AND s.is_delete = false AND s.state = 'FIXED'
+-- Inédito já REOPENED: completa o par OPENED + REOPENED.
+SELECT t.finding_id, t.product, 'REOPENED',
+       COALESCE(t.resurfaced_date, t.last_found, t.indexed), NULL, t.state,
+       NULL::jsonb, to_jsonb(t.state), %(source_path)s, %(scan_id)s
+FROM timeline t
+WHERE t.rn = 1 AND t.baseline_exists = false AND t.state = 'REOPENED'
 
 UNION ALL
--- 2c. inédito chegando REOPENED → o REOPENED que acompanha o OPENED da
---     regra 1. Está no texto da seção 8.3 ("o mesmo vale para inédito
---     chegando REOPENED"), mas ficou de fora do SQL de exemplo da 8.4.
-SELECT s.finding_id, s.product, 'REOPENED',
-       COALESCE(s.resurfaced_date, s.last_found, s.indexed), NULL, s.state,
-       NULL, to_jsonb(s.state), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-LEFT   JOIN finding_current c USING (finding_id)
-WHERE  c.finding_id IS NULL AND s.is_delete = false AND s.state = 'REOPENED'
+-- FIXED -> estado não-FIXED, inclusive entre versões do mesmo payload.
+SELECT t.finding_id, t.product, 'REOPENED',
+       COALESCE(t.resurfaced_date, t.last_found, t.indexed),
+       t.old_state, t.state,
+       to_jsonb(t.old_state), to_jsonb(t.state),
+       %(source_path)s, %(scan_id)s
+FROM timeline t
+WHERE t.old_state = 'FIXED' AND t.state <> 'FIXED'
 
 UNION ALL
--- 3. reaberto
-SELECT s.finding_id, s.product, 'REOPENED',
-       COALESCE(s.resurfaced_date, s.last_found, s.indexed), c.state, s.state,
-       to_jsonb(c.state), to_jsonb(s.state), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-JOIN   finding_current c USING (finding_id)
-WHERE  s.is_delete = false AND c.state = 'FIXED' AND s.state <> 'FIXED'
+-- Estado não-FIXED -> FIXED, inclusive entre versões do mesmo payload.
+SELECT t.finding_id, t.product, 'FIXED',
+       COALESCE(t.last_fixed, t.indexed), t.old_state, t.state,
+       to_jsonb(t.old_state), to_jsonb(t.state),
+       %(source_path)s, %(scan_id)s
+FROM timeline t
+WHERE t.old_state <> 'FIXED' AND t.state = 'FIXED'
 
 UNION ALL
--- 4. fechado
-SELECT s.finding_id, s.product, 'FIXED',
-       COALESCE(s.last_fixed, s.indexed), c.state, s.state,
-       to_jsonb(c.state), to_jsonb(s.state), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-JOIN   finding_current c USING (finding_id)
-WHERE  s.is_delete = false AND c.state <> 'FIXED' AND s.state = 'FIXED'
+-- Delete é uma transição própria: nunca converte state em FIXED.
+SELECT d.finding_id, d.product, 'DELETED', d.delete_clock,
+       d.old_state, NULL,
+       to_jsonb(d.old_state), NULL::jsonb,
+       %(source_path)s, %(scan_id)s
+FROM deletes_efetivos d
 
 UNION ALL
--- 5. excluído do Tenable — NÃO é remediação (seção 6.7). Se virasse FIXED, a
---    métrica de remediação inflaria com trabalho que ninguém fez.
-SELECT s.finding_id, s.product, 'DELETED',
-       COALESCE(s.deleted_at, s.indexed), c.state, NULL,
-       to_jsonb(c.state), NULL, %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-JOIN   finding_current c USING (finding_id)
-WHERE  s.is_delete = true AND c.deleted_at IS NULL
-
-UNION ALL
--- 6. recast alterado. Independente das anteriores: pode sair junto com
---    qualquer uma delas. A fonte primária é o próprio finding, que já traz
---    severity_modification_type (seção 8.6).
-SELECT s.finding_id, s.product, 'RECAST_CHANGED',
-       s.indexed, NULL, NULL,
-       to_jsonb(c.severity_modification_type),
-       to_jsonb(s.severity_modification_type), %(source_path)s, %(scan_id)s
-FROM   stg_finding s
-JOIN   finding_current c USING (finding_id)
-WHERE  s.is_delete = false
-  AND  c.severity_modification_type IS DISTINCT FROM s.severity_modification_type
+-- Recast é independente e pode coexistir com uma transição de state.
+SELECT t.finding_id, t.product, 'RECAST_CHANGED', t.indexed,
+       NULL, NULL,
+       to_jsonb(t.old_recast), to_jsonb(t.severity_modification_type),
+       %(source_path)s, %(scan_id)s
+FROM timeline t
+WHERE (t.baseline_exists OR t.rn > 1)
+  AND t.old_recast IS DISTINCT FROM t.severity_modification_type
 
 ON CONFLICT DO NOTHING;
