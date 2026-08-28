@@ -9,3 +9,8 @@ htmlcov/
 .env
 *.csv
 .postgres-test/
+# Clusters e sockets temporários do PostgreSQL usados nos testes locais.
+.postgres/
+postgres-data/
+pgdata/
+*.pgpass
