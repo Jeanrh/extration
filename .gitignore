@@ -14,3 +14,9 @@ htmlcov/
 postgres-data/
 pgdata/
 *.pgpass
+
+# Segredos e customizacoes de ambiente Kubernetes permanecem locais.
+/deploy/k8s/secret*.yaml
+/deploy/k8s/*secret*.yaml
+/deploy/k8s/overlays/
+/deploy/k8s/*-overlay.yaml

@@ -1,0 +1,17 @@
+.git
+.worktrees
+.superpowers
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+tests
+samples_s3
+.env*
+*.csv
+deploy/k8s/secret*.yaml
+deploy/k8s/*secret*.yaml
+deploy/k8s/overlays
+deploy/k8s/*-overlay.yaml

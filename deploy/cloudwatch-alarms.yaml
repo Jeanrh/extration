@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudWatch alarms for Tenable ingestion
+
+Parameters:
+  Namespace:
+    Type: String
+    Default: TenableIngestion
+  AlarmTopicArn:
+    Type: String
+
+Resources:
+  StaleManifestAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: No recent Tenable manifest was observed
+      MetricName: HoursSinceLastManifest
+      Namespace: !Ref Namespace
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 6
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  QuarantinedFilesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: One or more payload files are quarantined
+      MetricName: FilesQuarantined
+      Namespace: !Ref Namespace
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  MissingJobDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: No ingestion job duration was published for 26 hours
+      MetricName: JobDurationSeconds
+      Namespace: !Ref Namespace
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 26
+      DatapointsToAlarm: 26
+      Threshold: 0
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  FindingsOpenChangeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Open finding count changed by more than 20 percent
+      MetricName: FindingsOpenChangePercent
+      Namespace: !Ref Namespace
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 20
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
