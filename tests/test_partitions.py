@@ -179,6 +179,76 @@ def test_retencao_dropa_somente_meses_gerenciados_inteiramente_vencidos(conn):
         _drop(conn, *mensais, legado, comum)
 
 
+def test_retencao_preserva_relacao_que_substitui_candidata_stale(
+    conn, config_teste
+):
+    from psycopg import sql
+
+    from ingestion.db import conectar
+
+    nome = "finding_event_2044_01"
+    _drop(conn, nome)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "CREATE TABLE {} PARTITION OF finding_event "
+                "FOR VALUES FROM ({}) TO ({})"
+            ).format(
+                sql.Identifier(nome),
+                sql.Literal(dt.datetime(2044, 1, 1, tzinfo=dt.timezone.utc)),
+                sql.Literal(dt.datetime(2044, 2, 1, tzinfo=dt.timezone.utc)),
+            )
+        )
+
+    def substituir_candidata():
+        with conectar(config_teste.pg_dsn) as outra:
+            with outra.transaction(), outra.cursor() as cur:
+                cur.execute(
+                    sql.SQL("DROP TABLE {} ").format(sql.Identifier(nome))
+                )
+                cur.execute(
+                    sql.SQL("CREATE TABLE {} (marcador text)").format(
+                        sql.Identifier(nome)
+                    )
+                )
+
+    class _ConexaoComTroca:
+        def __init__(self, real):
+            self.real = real
+            self.trocou = False
+
+        def cursor(self):
+            return self.real.cursor()
+
+        def transaction(self):
+            if not self.trocou:
+                substituir_candidata()
+                self.trocou = True
+            return self.real.transaction()
+
+    try:
+        with pytest.raises(RuntimeError, match="candidata.*mudou"):
+            partitions.expurgar_particoes(
+                _ConexaoComTroca(conn),
+                retention_months=24,
+                hoje=dt.date(2046, 3, 15),
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.relkind, a.attname "
+                "FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "JOIN pg_attribute a ON a.attrelid = c.oid "
+                "WHERE n.nspname = current_schema() AND c.relname = %s "
+                "AND a.attname = 'marcador' AND NOT a.attisdropped",
+                (nome,),
+            )
+            assert cur.fetchone() == {"relkind": "r", "attname": "marcador"}
+    finally:
+        _drop(conn, nome)
+
+
 def test_retencao_ingest_file_preserva_quarentena(conn):
     with conn.transaction(), conn.cursor() as cur:
         for path, status in (("antigo-ok", "OK"), ("antigo-q", "QUARANTINED")):

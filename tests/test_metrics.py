@@ -48,7 +48,7 @@ def test_metricas_tem_nomes_unidades_e_valores_exatos_sem_arredondar():
         ("FilesQuarantined", 4, "Count"),
         ("FindingsOpen", 80, "Count"),
         ("JobDurationSeconds", 9.876543, "Seconds"),
-        ("FindingsOpenChangePercent", 20.0, "Count"),
+        ("FindingsOpenChangePercent", 20.0, "Percent"),
     ]
 
 
@@ -98,8 +98,18 @@ def _config_cloudwatch():
 def test_publicacao_nao_adiciona_dimensions_e_serializa_o_baseline():
     cliente = _CloudWatch()
     publicador = metrics.Publicador(_config_cloudwatch(), cliente=cliente)
+    estado = metrics.EstadoMetricas(
+        quarentena=0, findings_open=80, change_percent=12.345678
+    )
+    percentual = next(
+        metrica
+        for metrica in metrics.coletar(
+            _resultado(), estado, duracao_segundos=9.876543
+        )
+        if metrica.nome == "FindingsOpenChangePercent"
+    )
 
-    publicador.publicar([metrics.Metrica("FindingsOpenChangePercent", 12.345678)])
+    publicador.publicar([percentual])
 
     assert cliente.chamadas == [
         {
@@ -108,7 +118,7 @@ def test_publicacao_nao_adiciona_dimensions_e_serializa_o_baseline():
                 {
                     "MetricName": "FindingsOpenChangePercent",
                     "Value": 12.345678,
-                    "Unit": "Count",
+                    "Unit": "Percent",
                 }
             ],
         }

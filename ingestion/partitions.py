@@ -261,12 +261,23 @@ def expurgar_particoes(
 
     dropadas: list[str] = []
     for relacao in vencidas:
-        log.warning(
-            "expurgando partição vencida: %s (retenção %d meses)",
-            relacao.nome,
-            retention_months,
-        )
         with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE").format(
+                    sql.Identifier(relacao.schema), sql.Identifier(relacao.nome)
+                )
+            )
+            atual = _buscar_relacao(cur, relacao.schema, relacao.nome)
+            if atual != relacao:
+                raise RuntimeError(
+                    f"candidata de retenção {relacao.schema}.{relacao.nome} mudou "
+                    "depois da validação; expurgo abortado"
+                )
+            log.warning(
+                "expurgando partição vencida: %s (retenção %d meses)",
+                relacao.nome,
+                retention_months,
+            )
             cur.execute(
                 sql.SQL("DROP TABLE {}.{}").format(
                     sql.Identifier(relacao.schema), sql.Identifier(relacao.nome)

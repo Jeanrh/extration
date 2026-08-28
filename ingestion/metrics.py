@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 CONTAGEM = "Count"
 SEGUNDOS = "Seconds"
+PERCENTUAL = "Percent"
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,9 @@ def coletar(
         Metrica("FilesQuarantined", estado.quarentena),
         Metrica("FindingsOpen", estado.findings_open),
         Metrica("JobDurationSeconds", duracao_segundos, SEGUNDOS),
-        Metrica("FindingsOpenChangePercent", estado.change_percent),
+        Metrica(
+            "FindingsOpenChangePercent", estado.change_percent, PERCENTUAL
+        ),
     ]
     horas = resultado.horas_desde_ultimo_manifest
     if horas is not None:
