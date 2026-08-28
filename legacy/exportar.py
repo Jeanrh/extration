@@ -1,12 +1,13 @@
 """
 CLI do extrator do Tenable Data Stream.
 
-    python exportar.py                     # roda todos os relatórios
-    python exportar.py gestao_vuln         # roda um
-    python exportar.py intranet internet   # roda vários
-    python exportar.py --list              # lista os relatórios
+    python -m legacy.exportar                     # roda todos os relatórios
+    python -m legacy.exportar gestao_vuln         # roda um
+    python -m legacy.exportar intranet internet   # roda vários
+    python -m legacy.exportar --list              # lista os relatórios
 
-Config via .env (veja .env.example). Os relatórios são definidos em reports.py.
+Config via .env (veja .env.example). Os relatórios são definidos em
+legacy/reports.py.
 """
 
 from __future__ import annotations
@@ -15,13 +16,13 @@ import datetime as dt
 import sys
 import time
 
-from tenable_core import (
+from legacy.tenable_core import (
     carregar_config,
     criar_cliente_s3,
     executar_relatorio,
     formatar_duracao,
 )
-from reports import RELATORIOS
+from legacy.reports import RELATORIOS
 
 
 def _listar() -> None:

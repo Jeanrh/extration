@@ -8,7 +8,10 @@ __pycache__
 .coverage
 htmlcov
 tests
-samples_s3
+samples
+legacy
+docs
+scripts
 .env*
 *.csv
 deploy/k8s/secret*.yaml

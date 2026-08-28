@@ -8,7 +8,7 @@ Configuração via `.env`:
     + credenciais AWS (veja .env.example)
 
 Uso:
-    python gerar_exemplo_s3.py
+    python -m legacy.gerar_exemplo_s3
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import sys
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from tenable_core import buscar_objeto, carregar_config, criar_cliente_s3
+from legacy.tenable_core import buscar_objeto, carregar_config, criar_cliente_s3
 
 
 def main() -> None:

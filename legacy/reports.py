@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from tenable_core import Relatorio, data, dias_entre, montar_objeto_por_prefixo
+from legacy.tenable_core import Relatorio, data, dias_entre, montar_objeto_por_prefixo
 
 
 # ---------------------------------------------------------------------------

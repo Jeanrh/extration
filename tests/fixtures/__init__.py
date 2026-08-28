@@ -1,9 +1,9 @@
 """Construtores de payload, manifest e S3 falso para os testes.
 
-Os payloads de exemplo **reais** ficam em `samples_s3/` (baixados do bucket por
-`gerar_exemplos_s3_datastram.py`). Este módulo os carrega e os deforma de
-propósito para exercitar cada regra — em vez de duplicar os JSON aqui e
-deixá-los envelhecer em separado.
+Os payloads de exemplo **reais** ficam em `samples/` (baixados do bucket por
+`python -m legacy.gerar_exemplos_s3_datastram`). Este módulo os carrega e os
+deforma de propósito para exercitar cada regra — em vez de duplicar os JSON
+aqui e deixá-los envelhecer em separado.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 RAIZ = Path(__file__).resolve().parent.parent.parent
-SAMPLES = RAIZ / "samples_s3"
+SAMPLES = RAIZ / "samples"
 
 PREFIXO = "prod"
 

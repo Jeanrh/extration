@@ -160,7 +160,7 @@ def test_dockerfile_builds_minimal_fixed_non_root_cli_image():
         "ingestion/__pycache__/config.pyc",
         ".pytest_cache/CACHEDIR.TAG",
         "tests/test_cli.py",
-        "samples_s3/example.json",
+        "samples/example.json",
         ".env.production",
         "export.csv",
         "deploy/k8s/secret.local.yaml",

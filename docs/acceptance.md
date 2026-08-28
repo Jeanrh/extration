@@ -1,8 +1,8 @@
 # Aceite — critérios da SPEC e evidência verificável
 
-Este documento liga cada um dos nove critérios de aceite da seção 18 da
-`SPEC-tenable-datastream-ingestion.md` a um teste ou comando executável e ao
-resultado realmente observado.
+Este documento liga cada um dos nove critérios de aceite da seção 18 do
+[`docs/spec.md`](spec.md) a um teste ou comando executável e ao resultado
+realmente observado.
 
 Nada aqui é marcado como aprovado por leitura de código ou por inspeção de
 texto. O que depende de bucket real, console Tenable, e-mail do Data Stream,
@@ -27,7 +27,7 @@ no ambiente real: é a condição necessária, não a suficiente.
 |---|---|
 | Data da execução | 2026-08-28 |
 | Branch | `feat/tenable-ingestion-complete` |
-| Commit de código avaliado | `ddf4a2c` — a Task 9 altera apenas `.env.example`, `README.md` e `docs/`; nenhum arquivo de `ingestion/`, `migrations/`, `tests/` ou `deploy/` foi tocado depois desse commit |
+| Estado avaliado | Branch após a reorganização do repositório (exportador legado movido para `legacy/`, fixtures para `samples/`, spec para `docs/spec.md`). Toda a bateria foi reexecutada depois da mudança de caminhos; nenhuma lógica de `ingestion/`, `migrations/` ou `deploy/` foi alterada pela reorganização. |
 | Python | 3.14.6 no venv local; o projeto declara suporte a 3.11+ |
 | PostgreSQL de teste | 18, cluster descartável em diretório temporário, porta 55489 |
 | Sistema | Windows 11, PowerShell |
@@ -40,7 +40,7 @@ no ambiente real: é a condição necessária, não a suficiente.
 | Dependências coerentes | `python -m pip check` | `PASS_LOCAL` — `No broken requirements found.` |
 | CLI responde e expõe `reconcile` | `python -m ingestion.cli --help` | `PASS_LOCAL` — subcomandos `init-db, run, set-mode, reprocess, status, quarantine, reconcile` |
 | Entry point alternativo | `python main.py --help` | `PASS_LOCAL` — mesma saída de `python -m ingestion.cli` |
-| Compilação | `python -m compileall -q ingestion migrations tests` | `PASS_LOCAL` — sem saída, sem erro |
+| Compilação | `python -m compileall -q ingestion migrations tests legacy` | `PASS_LOCAL` — sem saída, sem erro |
 | Suíte sem banco | `python -m pytest -q -m 'not banco'` | `PASS_LOCAL` — `109 passed, 77 deselected` |
 | Suíte completa com PostgreSQL | `scripts\test-postgres.ps1 -PostgresBin 'C:\Program Files\PostgreSQL\18\bin' -Port 55489` | `PASS_LOCAL` — `186 passed`; cluster descartável criado e removido |
 | Linhagem Alembic | `alembic heads` | `PASS_LOCAL` — `0004 (head)`, cabeça única |
@@ -316,7 +316,7 @@ Permanecem visíveis, sem solução inventada.
 ```powershell
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m ingestion.cli --help
-.\.venv\Scripts\python.exe -m compileall -q ingestion migrations tests
+.\.venv\Scripts\python.exe -m compileall -q ingestion migrations tests legacy
 .\.venv\Scripts\python.exe -m pytest -q -m 'not banco'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-postgres.ps1 -PostgresBin 'C:\Program Files\PostgreSQL\18\bin' -Port 55489
 .\.venv\Scripts\alembic.exe heads

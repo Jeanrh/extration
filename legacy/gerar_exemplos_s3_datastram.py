@@ -7,7 +7,7 @@ Gera 1 exemplo de JSON de cada tipo de stream no S3:
 - WAS asset
 
 Uso:
-    python gerar_exemplos_s3_datastram.py
+    python -m legacy.gerar_exemplos_s3_datastram
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from tenable_core import buscar_objeto, carregar_config, criar_cliente_s3
+from legacy.tenable_core import buscar_objeto, carregar_config, criar_cliente_s3
 
 
 @dataclass(frozen=True)
@@ -97,7 +97,7 @@ def salvar_json_pretty(conteudo: bytes, caminho_saida: str) -> None:
 
 def main() -> None:
     config = carregar_config()
-    output_dir = os.getenv("S3_SAMPLES_OUTPUT_DIR", "samples_s3")
+    output_dir = os.getenv("S3_SAMPLES_OUTPUT_DIR", "samples")
     s3_client = criar_cliente_s3(config)
     os.makedirs(output_dir, exist_ok=True)
 

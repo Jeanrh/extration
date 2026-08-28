@@ -1,5 +1,5 @@
 """
-Smoke tests dos relatórios contra os JSON de `samples_s3/` + um S3 falso.
+Smoke tests dos relatórios legados contra os JSON de `samples/` + um S3 falso.
 
     pytest tests/                     (se tiver pytest)
     python tests/test_relatorios.py   (runner embutido)
@@ -13,11 +13,17 @@ import tempfile
 
 from conftest import FakeS3, payload  # noqa: F401  (dispara os stubs)
 
-from tenable_core import executar_relatorio
-from reports import RELATORIOS, INTRANET, GESTAO_VULN, VM_FINDINGS, WAS_FINDINGS
+from legacy.tenable_core import executar_relatorio
+from legacy.reports import (
+    RELATORIOS,
+    INTRANET,
+    GESTAO_VULN,
+    VM_FINDINGS,
+    WAS_FINDINGS,
+)
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SAMPLES = os.path.join(RAIZ, "samples_s3")
+SAMPLES = os.path.join(RAIZ, "samples")
 
 
 def _sample(nome):

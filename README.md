@@ -1,29 +1,49 @@
 # Tenable Data Stream → PostgreSQL
 
-Pipeline idempotente para ingerir manifests e payloads do Tenable Vulnerability
-Management no PostgreSQL. O fluxo principal processa apenas `FINDING`,
-`WAS_FINDING` e `FINDING_ENRICHED_ATTRIBUTES`, preserva estado corrente e
-timeline de eventos, mantém quarentena e publica métricas operacionais.
+Pipeline idempotente que ingere manifests e payloads do Tenable Vulnerability
+Management no PostgreSQL. Processa apenas `FINDING`, `WAS_FINDING` e
+`FINDING_ENRICHED_ATTRIBUTES`, preserva estado corrente e timeline de eventos,
+mantém quarentena e publica métricas operacionais.
 
 O destino de execução é um cluster EKS **já existente**. Criar cluster, VPC ou
-node groups não faz parte deste projeto. A base em `deploy/k8s` é um contrato
-versionado e não é aplicável diretamente: um overlay real precisa fornecer
-namespace, Secret, workload identity (IRSA ou EKS Pod Identity), imagem ECR por
-digest imutável e uma migração executada antes dos CronJobs.
+node groups não faz parte deste projeto.
 
-## Fluxo do pipeline
+## Estrutura
 
-O job lê manifests S3 e preserva a ordem declarada dos payloads. Cada payload é
-baixado em streaming, validado por MD5 e contagens, processado em transação
+```
+ingestion/      pipeline: CLI, S3, manifest, payload, loader, métricas e SQL
+migrations/     Alembic + DDL versionada do schema
+deploy/         base Kubernetes (CronJobs) e template de alarmes CloudWatch
+scripts/        harness de PostgreSQL descartável para os testes
+samples/        payloads de exemplo reais — fixtures da suíte
+tests/          suíte completa (186 testes)
+docs/           spec, runbook operacional e mapa de aceite
+legacy/         exportador CSV anterior ao pipeline, mantido em separado
+main.py         entry point equivalente a `python -m ingestion.cli`
+```
+
+## Documentação
+
+| Documento | Para quê |
+|---|---|
+| [docs/spec.md](docs/spec.md) | A especificação completa: modelo de dados, regras de ingestão, motor de eventos, decisões arquiteturais. |
+| [docs/runbook.md](docs/runbook.md) | Operação do dia a dia: setup, seed, corte, quarentena, reprocesso, reconciliação, deploy, rollback e diagnóstico. |
+| [docs/acceptance.md](docs/acceptance.md) | Estado verificável dos nove critérios de aceite, com comando e evidência de cada um. |
+| [legacy/README.md](legacy/README.md) | O exportador CSV legado, que não participa do pipeline. |
+
+## Como funciona
+
+O job lê manifests do S3 e preserva a ordem declarada dos payloads. Cada payload
+é baixado em streaming, validado por MD5 e contagens, processado em transação
 isolada e registrado em `ingest_file`. O modo `SEED` popula o estado sem criar
 eventos; o modo `INCREMENTAL` mantém o estado e também gera eventos.
 
-O Data Stream pode publicar arquivos com frequência de até 15 minutos ("as
-often as every 15 minutes"); isso não é uma garantia rígida nem um SLA. Esta
-implantação escolhe executar a ingestão uma vez por dia e deve reavaliar a
-frequência depois de medir a duração real do ciclo.
+O Data Stream pode publicar com frequência de até 15 minutos ("as often as every
+15 minutes"); isso não é garantia rígida nem SLA. Esta implantação executa a
+ingestão uma vez por dia e deve reavaliar a frequência depois de medir a duração
+real do ciclo.
 
-O loader usa uma whitelist fixa:
+O loader usa uma whitelist fixa de três tipos:
 
 | Payload | Manifest | Produto |
 |---|---|---|
@@ -34,13 +54,10 @@ O loader usa uma whitelist fixa:
 `host_audit_finding` (compliance) e `tds_test_file` (teste de conectividade) não
 são ingeridos.
 
-## Requisitos e instalação local
+## Setup local
 
-- Python 3.11 ou superior;
-- PostgreSQL 14 ou superior, descartável para desenvolvimento/testes;
-- acesso de leitura ao bucket S3 e permissão de escrita no banco.
-
-No PowerShell:
+Requisitos: Python 3.11+, PostgreSQL 14+ descartável para desenvolvimento,
+leitura no bucket S3 e escrita no banco.
 
 ```powershell
 python -m venv .venv
@@ -48,37 +65,33 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-Preencha `TENABLE_BUCKET` e `PG_DSN` fora do Git. Sem credenciais AWS explícitas,
-o boto3 usa sua cadeia padrão. Em EKS, use IRSA ou EKS Pod Identity; não coloque
-credenciais estáticas no Secret.
+Preencha `TENABLE_BUCKET` e `PG_DSN` fora do Git. Sem credenciais AWS
+explícitas, o boto3 usa a cadeia padrão. Em EKS, use IRSA ou EKS Pod Identity;
+não coloque credenciais estáticas no Secret.
 
-Para um banco **local ou de teste**, inicialize o schema com:
+Para um banco **local ou de teste**, inicialize o schema:
 
 ```powershell
 .\.venv\Scripts\python.exe -m ingestion.cli init-db
 ```
 
-Esse comando usa o ledger local `schema_migration`. HML e produção usam
+`init-db` usa o ledger local `schema_migration`. HML e produção usam
 exclusivamente `python -m alembic upgrade head`, cujo ledger é
 `alembic_version`. Não misture os dois mecanismos no mesmo banco.
 
 ## Primeira execução
 
-Confira a configuração e rode um smoke mutável:
-
 ```powershell
-.\.venv\Scripts\python.exe -m ingestion.cli --help
 .\.venv\Scripts\python.exe -m ingestion.cli run --seed --limit 1
 .\.venv\Scripts\python.exe -m ingestion.cli status
 ```
 
 `run --seed --limit 1` **não é dry-run**: baixa e confirma até um payload,
-altera o banco e o ledger. Use apenas um banco/bucket autorizados para esse
-smoke.
+altera o banco e o ledger. Use apenas um banco/bucket autorizados.
 
-Depois, drene o backfill em `SEED`. A troca para `INCREMENTAL` é manual, depois
-de observar estabilidade de inéditos por três dias. Sempre grave o cutoff com
-offset explícito:
+Depois, drene o backfill em `SEED`. A troca para `INCREMENTAL` é manual, após
+observar estabilidade de inéditos por três dias, e o cutoff sempre leva offset
+explícito — data-only é interpretada como meia-noite UTC:
 
 ```powershell
 .\.venv\Scripts\python.exe -m ingestion.cli run --seed
@@ -86,13 +99,8 @@ offset explícito:
 .\.venv\Scripts\python.exe -m ingestion.cli run
 ```
 
-Um cutoff somente com data, como `2026-09-05`, é interpretado como meia-noite
-UTC. O offset explícito evita ambiguidade operacional.
-
-Todos os fluxos de setup, seed, corte, incremental, lock, quarentena,
-reprocesso, reconciliação, partições, retenção, métricas, alarmes, deploy e
-diagnóstico estão em [docs/runbook.md](docs/runbook.md). O estado verificável
-dos nove critérios da SPEC está em [docs/acceptance.md](docs/acceptance.md).
+O [runbook](docs/runbook.md) cobre o resto: lock, quarentena, reprocesso,
+reconciliação, partições, retenção, métricas, alarmes, deploy e diagnóstico.
 
 ## Comandos
 
@@ -103,13 +111,12 @@ python -m ingestion.cli set-mode SEED|INCREMENTAL [--cutoff ISO] [--notes TEXTO]
 python -m ingestion.cli status
 python -m ingestion.cli quarantine
 python -m ingestion.cli reprocess --path <path-do-ledger>
-python -m ingestion.cli reconcile [--output ARQUIVO] [--console-vm-open N] [--console-was-open N]
+python -m ingestion.cli reconcile [--output ARQUIVO|-] [--console-vm-open N] [--console-was-open N]
 ```
 
 `reprocess` exige a key exata de um payload já existente em `ingest_file` e
-reutiliza o modo original registrado no ledger. A reconciliação sem contagens
-do console grava `console_comparison: "NOT_PROVIDED"`; ela não inventa acesso
-ao Tenable.
+reutiliza o modo original do ledger. A reconciliação sem contagens do console
+grava `console_comparison: "NOT_PROVIDED"`; ela não inventa acesso ao Tenable.
 
 ## Validação local
 
@@ -120,10 +127,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-postgres.
 .\.venv\Scripts\python.exe -m compileall -q ingestion migrations tests
 ```
 
-Use uma porta descartável livre, diferente de `5432`; o exemplo usa `55489`.
-Pytest sem `TEST_PG_DSN`, ou apenas com `-m 'not banco'`, não é aceite total: os
-testes PostgreSQL são parte obrigatória da validação. Docker, EKS, AWS, o bucket
-e o console Tenable exigem validação externa no ambiente real.
+Use uma porta descartável livre, diferente de `5432`. Pytest sem `TEST_PG_DSN`,
+ou apenas com `-m 'not banco'`, **não é aceite total**: os testes PostgreSQL são
+parte obrigatória da validação. Docker, EKS, AWS, o bucket e o console Tenable
+exigem validação externa — o estado de cada gate está em
+[docs/acceptance.md](docs/acceptance.md).
 
 ## Documentação oficial do Tenable
 
@@ -134,19 +142,3 @@ e o console Tenable exigem validação externa no ambiente real.
 - [Payloads de findings WAS](https://docs.tenable.com/vulnerability-management/Content/Settings/data-stream/web-app-scanning-findings-payload-files.htm)
 - [Payloads de atributos enriquecidos](https://docs.tenable.com/vulnerability-management/Content/Settings/data-stream/finding-enriched-attributes-payload-files.htm)
 - [Data Stream best practices](https://docs.tenable.com/vulnerability-management/Content/Settings/data-stream/data-stream-best-practices.htm)
-
-## Exportador CSV legado
-
-O exportador CSV anterior continua disponível, mas é separado do pipeline
-PostgreSQL e não participa dos CronJobs EKS descritos acima.
-
-```powershell
-.\.venv\Scripts\python.exe exportar.py --list
-.\.venv\Scripts\python.exe exportar.py
-.\.venv\Scripts\python.exe exportar.py gestao_vuln
-```
-
-Ele usa `AWS_S3_BUCKET` e as variáveis da seção "Exportador CSV legado" em
-`.env.example`. As definições ficam em `reports.py`; os CSVs são gravados em
-`csv/` em UTF-8 com BOM. Os scripts `gerar_exemplo_s3.py` e
-`gerar_exemplos_s3_datastram.py` também pertencem apenas a esse fluxo legado.
