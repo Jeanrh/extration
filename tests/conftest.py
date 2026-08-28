@@ -162,7 +162,10 @@ if pytest is not None:
                 cur.execute(
                     "TRUNCATE " + ", ".join(TABELAS_DE_TESTE) + " RESTART IDENTITY CASCADE"
                 )
-                cur.execute("UPDATE pipeline_control SET mode='SEED', cutoff_at=NULL WHERE id=1")
+                cur.execute(
+                    "UPDATE pipeline_control SET mode='SEED', cutoff_at=NULL, "
+                    "last_findings_open=NULL WHERE id=1"
+                )
             yield conexao
 
     @pytest.fixture

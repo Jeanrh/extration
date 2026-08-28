@@ -28,6 +28,13 @@ class Metrica:
     unidade: str = CONTAGEM
 
 
+@dataclass(frozen=True)
+class EstadoMetricas:
+    quarentena: int
+    findings_open: int
+    change_percent: float
+
+
 class Publicador:
     """Publica no CloudWatch quando habilitado; senão só loga.
 
@@ -50,35 +57,86 @@ class Publicador:
         if not self.config.cloudwatch_habilitado:
             log.debug("CloudWatch desabilitado (CLOUDWATCH_ENABLED); métricas só em log")
             return
+
+        # Construção e validação dos dados ficam fora da fronteira tolerada.
+        # AttributeError/TypeError aqui são erros de programação e devem abortar.
+        dados = [
+            {
+                "MetricName": m.nome,
+                "Value": float(m.valor),
+                "Unit": m.unidade,
+            }
+            for m in metricas
+        ]
+        cliente = self.cliente()
         try:
-            self.cliente().put_metric_data(
+            cliente.put_metric_data(
                 Namespace=self.config.cloudwatch_namespace,
-                MetricData=[
-                    {
-                        "MetricName": m.nome,
-                        "Value": float(m.valor),
-                        "Unit": m.unidade,
-                    }
-                    for m in metricas
-                ],
+                MetricData=dados,
             )
         except Exception:  # noqa: BLE001 - observabilidade não derruba ingestão
             log.exception("falha ao publicar métricas no CloudWatch")
 
 
-def coletar(conn, resultado: Any, quarentena: int, abertos: int) -> list[Metrica]:
+def variacao_percentual(atual: int, anterior: int | None) -> float:
+    if anterior is None or (anterior == 0 and atual == 0):
+        return 0.0
+    if anterior == 0:
+        return 100.0
+    return abs(atual - anterior) / anterior * 100.0
+
+
+def capturar_estado(conn) -> EstadoMetricas:
+    """Serializa baseline e contagens antes de qualquer chamada à AWS."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_findings_open FROM pipeline_control "
+            "WHERE id = 1 FOR UPDATE"
+        )
+        controle = cur.fetchone()
+        if controle is None:
+            raise RuntimeError("pipeline_control id=1 não existe")
+        anterior = controle["last_findings_open"]
+
+        cur.execute(
+            "SELECT count(*) AS total FROM finding_current "
+            "WHERE state <> 'FIXED' AND deleted_at IS NULL"
+        )
+        abertos = int(cur.fetchone()["total"])
+        cur.execute(
+            "SELECT count(*) AS total FROM ingest_file WHERE status = 'QUARANTINED'"
+        )
+        quarentena = int(cur.fetchone()["total"])
+        cur.execute(
+            "UPDATE pipeline_control SET last_findings_open = %s WHERE id = 1",
+            (abertos,),
+        )
+
+    return EstadoMetricas(
+        quarentena=quarentena,
+        findings_open=abertos,
+        change_percent=variacao_percentual(abertos, anterior),
+    )
+
+
+def coletar(
+    resultado: Any, estado: EstadoMetricas, duracao_segundos: float
+) -> list[Metrica]:
     """Monta o conjunto da seção 13.1 a partir do resultado do ciclo."""
     metricas = [
         Metrica("PayloadsProcessed", resultado.payloads_ok),
         Metrica("RecordsIngested", resultado.registros),
         Metrica("EventsGenerated", resultado.eventos),
-        Metrica("FilesQuarantined", quarentena),
-        Metrica("FindingsOpen", abertos),
-        Metrica("JobDurationSeconds", resultado.duracao_segundos, SEGUNDOS),
+        Metrica("FilesQuarantined", estado.quarentena),
+        Metrica("FindingsOpen", estado.findings_open),
+        Metrica("JobDurationSeconds", duracao_segundos, SEGUNDOS),
+        Metrica("FindingsOpenChangePercent", estado.change_percent),
     ]
     horas = resultado.horas_desde_ultimo_manifest
     if horas is not None:
-        metricas.insert(0, Metrica("HoursSinceLastManifest", round(horas, 2)))
+        metricas.insert(0, Metrica("HoursSinceLastManifest", horas))
+    else:
+        log.error("ALARME: nenhum manifest encontrado no bucket")
     return metricas
 
 

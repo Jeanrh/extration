@@ -19,8 +19,9 @@ import argparse
 import datetime as dt
 import logging
 import sys
+import time
 
-from . import metrics, partitions
+from . import metrics, partitions, reconcile
 from .config import MODOS, Config, carregar_config, configurar_logging, resumo_config
 from .db import aplicar_migracoes, conectar, travar_pipeline
 from .erros import ErroIngestao
@@ -44,6 +45,7 @@ def cmd_init_db(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_run(config: Config, args: argparse.Namespace) -> int:
+    inicio_job = time.monotonic()
     modo = "SEED" if args.seed else args.mode
     with conectar(config.pg_dsn) as conn:
         with travar_pipeline(conn) as obtido:
@@ -79,13 +81,19 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
                 len(criadas), len(dropadas), removidas, na_default,
             )
 
-            quarentena = metrics.contar_quarentena(conn)
-            abertos = metrics.contar_abertos(conn)
-            metrics.Publicador(config).publicar(
-                metrics.coletar(conn, resultado, quarentena, abertos)
-            )
+            estado = metrics.capturar_estado(conn)
+            metricas_ciclo = metrics.coletar(resultado, estado, 0.0)
+            duracao_job = time.monotonic() - inicio_job
+            resultado.duracao_segundos = duracao_job
+            metricas_ciclo = [
+                metrics.Metrica(m.nome, duracao_job, m.unidade)
+                if m.nome == "JobDurationSeconds"
+                else m
+                for m in metricas_ciclo
+            ]
+            metrics.Publicador(config).publicar(metricas_ciclo)
 
-    _resumo_ciclo(config, resultado, quarentena, abertos)
+    _resumo_ciclo(config, resultado, estado.quarentena, estado.findings_open)
     return 1 if resultado.payloads_falhos or resultado.erros_manifest else 0
 
 
@@ -202,6 +210,21 @@ def cmd_quarantine(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reconcile(config: Config, args: argparse.Namespace) -> int:
+    with conectar(config.pg_dsn) as conn:
+        with travar_pipeline(conn) as obtido:
+            if not obtido:
+                log.error("outra execução detém o lock do pipeline; reconciliação abortada")
+                return 1
+            relatorio = reconcile.gerar_relatorio(
+                conn,
+                console_vm_open=args.console_vm_open,
+                console_was_open=args.console_was_open,
+            )
+            reconcile.escrever_relatorio(relatorio, args.output)
+    return 0
+
+
 # ===========================================================================
 # Parser
 # ===========================================================================
@@ -234,7 +257,19 @@ def montar_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="saúde do pipeline")
     sub.add_parser("quarantine", help="lista os arquivos em quarentena")
+
+    p_reconcile = sub.add_parser("reconcile", help="gera reconciliação semanal local")
+    p_reconcile.add_argument("--output", default="-", help="arquivo JSON ou - para stdout")
+    p_reconcile.add_argument("--console-vm-open", type=_contagem_nao_negativa)
+    p_reconcile.add_argument("--console-was-open", type=_contagem_nao_negativa)
     return parser
+
+
+def _contagem_nao_negativa(valor: str) -> int:
+    numero = int(valor)
+    if numero < 0:
+        raise argparse.ArgumentTypeError("a contagem não pode ser negativa")
+    return numero
 
 
 COMANDOS = {
@@ -244,6 +279,7 @@ COMANDOS = {
     "reprocess": cmd_reprocess,
     "status": cmd_status,
     "quarantine": cmd_quarantine,
+    "reconcile": cmd_reconcile,
 }
 
 

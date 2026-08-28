@@ -167,6 +167,12 @@ class Config:
 
     log_level: str = "INFO"
 
+    def __post_init__(self) -> None:
+        if self.retention_months < 1:
+            raise ErroConfiguracao("RETENTION_MONTHS deve ser >= 1")
+        if self.retencao_ingest_file_dias < 1:
+            raise ErroConfiguracao("INGEST_FILE_RETENTION_DAYS deve ser >= 1")
+
     def prefixo_de(self, diretorio: str) -> str:
         """Prefixo S3 completo de um diretório do stream, com barra final."""
         partes = [p for p in (self.prefixo.strip("/"), diretorio.strip("/")) if p]
@@ -208,6 +214,10 @@ def carregar_config() -> Config:
     if retention < 1:
         raise ErroConfiguracao("RETENTION_MONTHS deve ser >= 1")
 
+    retencao_ingest_file = _inteiro("INGEST_FILE_RETENTION_DAYS", 90)
+    if retencao_ingest_file < 1:
+        raise ErroConfiguracao("INGEST_FILE_RETENTION_DAYS deve ser >= 1")
+
     return Config(
         bucket=bucket,
         prefixo=_texto("TENABLE_PREFIX"),
@@ -218,7 +228,7 @@ def carregar_config() -> Config:
         cloudwatch_namespace=_texto("CLOUDWATCH_NAMESPACE", "TenableIngestion"),
         cloudwatch_habilitado=_booleano("CLOUDWATCH_ENABLED", False),
         retention_months=retention,
-        retencao_ingest_file_dias=_inteiro("INGEST_FILE_RETENTION_DAYS", 90),
+        retencao_ingest_file_dias=retencao_ingest_file,
         horas_sem_manifest_alerta=_inteiro("MANIFEST_STALE_HOURS", 6),
         region_name=_texto("AWS_REGION", "us-east-1"),
         aws_access_key_id=_texto("AWS_ACCESS_KEY_ID") or None,
