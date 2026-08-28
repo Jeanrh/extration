@@ -10,10 +10,13 @@ from __future__ import annotations
 import datetime as dt
 import json
 
+import psycopg
 import pytest
 
 from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
+from ingestion import loader as loader_mod
 from ingestion.config import TIPOS_PAYLOAD
+from ingestion.erros import ErroParse
 from ingestion.manifest import parse_manifest
 
 pytestmark = pytest.mark.banco
@@ -102,6 +105,72 @@ def test_erro_de_programacao_nao_registra_retry_ou_quarentena(ingestor, conn, mo
     with conn.cursor() as cur:
         cur.execute("SELECT status FROM ingest_file WHERE path = %s", (entrada.path,))
         assert cur.fetchone() is None
+
+
+def test_erro_ao_persistir_retry_de_conteudo_aborta_job(ingestor, conn, monkeypatch, caplog):
+    """Falha do banco ao marcar retry não pode ser convertida em FAILED."""
+    bucket = Bucket()
+    bucket.adicionar(
+        "FINDING",
+        envelope("FINDING", [finding_vm(finding_id="f1")]),
+        md5_forcado="md5-invalido",
+    )
+    manifest_path = bucket.fechar_manifest("FINDING")
+    manifest = parse_manifest(manifest_path, json.loads(bucket.store[manifest_path]))
+    entrada = manifest.payloads[0]
+    sql_original = loader_mod.carregar_sql
+
+    def sql_com_falha(nome):
+        return "SELECT 1 / 0" if nome == "61_mark_failure" else sql_original(nome)
+
+    monkeypatch.setattr(loader_mod, "carregar_sql", sql_com_falha)
+
+    with pytest.raises(psycopg.errors.DivisionByZero):
+        ingestor(bucket.store).processar_payload(
+            entrada, manifest, TIPOS_PAYLOAD["FINDING"], "SEED"
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM ingest_file WHERE path = %s", (entrada.path,))
+        assert cur.fetchone() is None
+    assert any("não foi possível registrar a falha" in registro.message for registro in caplog.records)
+
+
+def test_erro_operacional_no_download_do_manifest_aborta_ciclo(ingestor, monkeypatch, caplog):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    bucket.fechar_manifest("FINDING")
+    ing = ingestor(bucket.store)
+
+    def indisponivel(_key):
+        raise RuntimeError("permissão negada")
+
+    monkeypatch.setattr(ing.cliente, "baixar", indisponivel)
+
+    with pytest.raises(RuntimeError, match="permissão negada"):
+        ing.executar(modo="INCREMENTAL")
+
+    assert any("manifest ilegível" in registro.message for registro in caplog.records)
+
+
+def test_manifest_malformado_interrompe_antes_do_manifest_posterior(ingestor, conn, caplog):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="primeiro")]))
+    manifest_malformado = bucket.fechar_manifest("FINDING")
+    path_posterior = bucket.adicionar(
+        "FINDING", envelope("FINDING", [finding_vm(finding_id="posterior")])
+    )
+    bucket.fechar_manifest("FINDING")
+    bucket.store[manifest_malformado] = b"nao-e-json"
+
+    with pytest.raises(ErroParse, match="JSON inválido"):
+        ingestor(bucket.store).executar(modo="INCREMENTAL")
+
+    assert estado(conn, "posterior") is None
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM ingest_file WHERE path = %s", (path_posterior,))
+        assert cur.fetchone() is None
+    assert any("manifest ilegível" in registro.message for registro in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +765,7 @@ def test_payload_ja_processado_e_pulado(ingestor, conn):
     assert segundo.payloads_pulados == 1
 
 
-def test_manifest_totalmente_ok_soma_todos_os_payloads_sem_consumir_limite(ingestor, conn):
+def test_manifest_totalmente_ok_soma_skips_e_mantem_limite_para_posterior(ingestor, conn, caplog):
     bucket = Bucket()
     bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
     bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f2")]))
@@ -704,8 +773,13 @@ def test_manifest_totalmente_ok_soma_todos_os_payloads_sem_consumir_limite(inges
     ing = ingestor(bucket.store)
 
     primeiro = ing.executar(modo="INCREMENTAL")
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f3")]))
+    bucket.fechar_manifest("FINDING")
+    caplog.set_level("WARNING", logger="ingestion.loader")
     segundo = ing.executar(modo="INCREMENTAL", limite=1)
 
     assert primeiro.payloads_ok == 2
-    assert segundo.payloads_ok == 0
+    assert segundo.payloads_ok == 1
     assert segundo.payloads_pulados == 2
+    assert estado(conn, "f3") is not None
+    assert any("já totalmente processado" in registro.message for registro in caplog.records)

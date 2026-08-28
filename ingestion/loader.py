@@ -138,10 +138,9 @@ class Ingestor:
         try:
             doc = s3mod.ler_documento(self.cliente.baixar(key), key)
             manifest = parse_manifest(key, doc)
-        except Exception as erro:  # noqa: BLE001 - manifest ilegível não pode parar a fila
-            log.error("manifest ilegível %s: %s", key, erro)
-            resultado.erros_manifest.append(f"{key}: {erro}")
-            return restante
+        except Exception:  # noqa: BLE001 - ordem exige abortar no manifest falho
+            log.exception("manifest ilegível %s", key)
+            raise
 
         resultado.manifests_lidos += 1
         if manifest.payload_type and manifest.payload_type != tipo.nome:
@@ -154,7 +153,7 @@ class Ingestor:
         if manifest.payloads and all(
             estados.get(e.path) == STATUS_OK for e in manifest.payloads
         ):
-            log.debug("manifest %s já totalmente processado", key)
+            log.warning("manifest %s já totalmente processado", key)
             resultado.payloads_pulados += len(manifest.payloads)
             return restante
 
@@ -164,6 +163,7 @@ class Ingestor:
                 break
             situacao = estados.get(entrada.path)
             if situacao == STATUS_OK:
+                log.warning("payload já processado, pulando: %s", entrada.path)
                 resultado.payloads_pulados += 1
                 continue
             if situacao == STATUS_QUARENTENA:
@@ -224,7 +224,7 @@ class Ingestor:
                     )
                     registro = cur.fetchone()
                 if registro is not None and registro["status"] == STATUS_OK and not forcar:
-                    log.info("payload já processado, pulando: %s", entrada.path)
+                    log.warning("payload já processado, pulando: %s", entrada.path)
                     return ResultadoPayload(entrada.path, STATUS_PULADO)
                 achatado = self._carregar(entrada, tipo)
                 eventos = self._aplicar(achatado, entrada, manifest, tipo, modo)
@@ -387,9 +387,9 @@ class Ingestor:
                     },
                 )
                 linha = cur.fetchone()
-        except Exception:  # noqa: BLE001 - banco fora do ar é outro problema
+        except Exception:
             log.exception("não foi possível registrar a falha de %s", entrada.path)
-            return ResultadoPayload(entrada.path, STATUS_FALHOU, erro=mensagem)
+            raise
 
         status = linha["status"] if linha else STATUS_FALHOU
         if status == STATUS_QUARENTENA:
