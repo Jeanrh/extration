@@ -255,14 +255,14 @@ def test_payload_ok_e_pulado_transacionalmente_mas_forcar_reprocessa(ingestor, c
 
     assert ing.processar_payload(entrada, manifest, tipo, "SEED").status == "OK"
 
-    original_baixar = ing.cliente.baixar
+    original_baixar_payload = ing.cliente.baixar_payload
 
     def download_indevido(_path):
         raise AssertionError("payload OK não deve ser baixado sem forçar")
 
-    ing.cliente.baixar = download_indevido
+    ing.cliente.baixar_payload = download_indevido
     assert ing.processar_payload(entrada, manifest, tipo, "SEED").status == "SKIPPED"
-    ing.cliente.baixar = original_baixar
+    ing.cliente.baixar_payload = original_baixar_payload
 
     assert ing.processar_payload(entrada, manifest, tipo, "SEED", forcar=True).status == "OK"
     with conn.cursor() as cur:

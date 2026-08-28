@@ -17,7 +17,7 @@ from conftest import RAIZ
 from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
 from ingestion import loader as loader_mod
 from ingestion.config import TIPOS_PAYLOAD
-from ingestion.erros import ErroParse
+from ingestion.erros import ErroIntegridade, ErroParse
 from ingestion.manifest import parse_manifest
 
 pytestmark = pytest.mark.banco
@@ -129,6 +129,77 @@ def test_seed_grava_o_modo_em_ingest_file(ingestor, conn):
     assert linha["rows_read"] == 1
 
 
+def test_payload_com_type_de_outro_stream_entra_no_ledger_de_falha(ingestor, conn):
+    bucket = Bucket()
+    doc = envelope("WAS_FINDING", [finding_was(finding_id="was-misrouted")])
+    bucket.adicionar("FINDING", doc, scan_id="scan-misrouted")
+
+    resultado = ciclo(ingestor, bucket, "INCREMENTAL")
+
+    assert resultado.payloads_falhos == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, first_record_timestamp, last_record_timestamp, scan_id "
+            "FROM ingest_file"
+        )
+        linha = cur.fetchone()
+    assert linha["status"] == "FAILED"
+    assert linha["first_record_timestamp"] == dt.datetime(
+        2026, 8, 27, 10, 32, 19, 356000, tzinfo=dt.timezone.utc
+    )
+    assert linha["last_record_timestamp"] == linha["first_record_timestamp"]
+    assert linha["scan_id"] == "scan-misrouted"
+
+
+def test_processar_payload_nao_materializa_json(monkeypatch, ingestor, conn):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    manifest_path = bucket.fechar_manifest("FINDING")
+    manifest = parse_manifest(manifest_path, json.loads(bucket.store[manifest_path]))
+    entrada = manifest.payloads[0]
+    ing = ingestor(bucket.store)
+    monkeypatch.setattr(
+        json,
+        "loads",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("payload materializado")
+        ),
+    )
+
+    resultado = ing.processar_payload(
+        entrada, manifest, TIPOS_PAYLOAD["FINDING"], "SEED"
+    )
+
+    assert resultado.status == "OK"
+    assert estado(conn, "f1")["state"] == "OPEN"
+
+
+def test_invariante_de_copy_e_falha_operacional_sem_ledger(
+    monkeypatch, ingestor, conn
+):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    manifest_path = bucket.fechar_manifest("FINDING")
+    manifest = parse_manifest(manifest_path, json.loads(bucket.store[manifest_path]))
+    entrada = manifest.payloads[0]
+    copiar_real = loader_mod._copiar
+
+    def copiar_com_contagem_corrompida(cur, tabela, classe, linhas):
+        total = copiar_real(cur, tabela, classe, linhas)
+        return total - 1 if tabela == "stg_finding" else total
+
+    monkeypatch.setattr(loader_mod, "_copiar", copiar_com_contagem_corrompida)
+
+    with pytest.raises(RuntimeError, match="invariante.*COPY"):
+        ingestor(bucket.store).processar_payload(
+            entrada, manifest, TIPOS_PAYLOAD["FINDING"], "SEED"
+        )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM ingest_file WHERE path = %s", (entrada.path,))
+        assert cur.fetchone() is None
+
+
 def test_erro_de_programacao_nao_registra_retry_ou_quarentena(ingestor, conn, monkeypatch):
     """Só conteúdo inválido pode avançar o ledger de tentativas do arquivo."""
     bucket = Bucket()
@@ -215,6 +286,29 @@ def test_manifest_malformado_interrompe_antes_do_manifest_posterior(ingestor, co
         cur.execute("SELECT 1 FROM ingest_file WHERE path = %s", (path_posterior,))
         assert cur.fetchone() is None
     assert any("manifest ilegível" in registro.message for registro in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    [
+        ("type", "MANIFEST_WAS_FINDING"),
+        ("payload_type", "WAS_FINDING"),
+    ],
+)
+def test_manifest_de_outro_stream_e_rejeitado_sem_processar_payload(
+    ingestor, conn, campo, valor
+):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    manifest_path = bucket.fechar_manifest("FINDING")
+    doc = json.loads(bucket.store[manifest_path])
+    doc[campo] = valor
+    bucket.store[manifest_path] = json.dumps(doc).encode("utf-8")
+
+    with pytest.raises(ErroIntegridade, match=campo):
+        ingestor(bucket.store).executar(modo="INCREMENTAL")
+
+    assert estado(conn, "f1") is None
 
 
 # ---------------------------------------------------------------------------

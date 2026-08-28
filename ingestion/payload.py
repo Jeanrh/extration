@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import hashlib
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Iterable, Mapping
 
 from .config import PRODUTO_VM, PRODUTO_WAS, TipoPayload
@@ -657,6 +657,27 @@ def _achatar_enriched(
                 raw=registro,
             )
         )
+
+
+def achatar_registro_enriched(
+    tipo: TipoPayload,
+    registro: Mapping[str, Any],
+    *,
+    is_delete: bool,
+    seq: int,
+    fallback: dt.datetime | None,
+) -> LinhaRecast:
+    """Adaptador limitado a um item para o parser streaming.
+
+    ``_achatar_enriched`` permanece a fonte única do mapa; as listas abaixo
+    têm sempre zero ou um elemento e, portanto, não crescem com o payload.
+    """
+    resultado = PayloadAchatado()
+    if is_delete:
+        _achatar_enriched(resultado, tipo, [], [dict(registro)], fallback)
+    else:
+        _achatar_enriched(resultado, tipo, [dict(registro)], [], fallback)
+    return replace(resultado.recasts[0], seq=seq)
 
 
 def _id_delete(registro: Mapping[str, Any], tipo: TipoPayload) -> str | None:

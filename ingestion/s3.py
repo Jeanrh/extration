@@ -13,7 +13,11 @@ import hashlib
 import json
 import logging
 import random
+import re
+import tempfile
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -24,6 +28,9 @@ from .config import Config, TipoPayload
 from .erros import ErroIntegridade, ErroParse
 
 log = logging.getLogger(__name__)
+
+CHUNK_PAYLOAD = 1024 * 1024
+_MD5_HEX = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def criar_cliente_s3(config: Config, max_pool_connections: int = 10):
@@ -132,6 +139,90 @@ class ClienteS3:
                 )
                 time.sleep(max(0.0, atraso))
                 tentativa += 1
+
+    @contextmanager
+    def baixar_payload(self, key: str, md5_esperado: str | None):
+        """Baixa um payload comprimido para um temporário de memória limitada.
+
+        Cada tentativa S3 começa em um arquivo novo. O arquivo validado existe
+        somente durante o ``with`` e apenas esse caminho é removido na saída.
+        """
+        if not isinstance(md5_esperado, str) or not _MD5_HEX.fullmatch(
+            md5_esperado.strip()
+        ):
+            raise ErroIntegridade(f"md5 inválido no manifest para {key}")
+
+        esperado = md5_esperado.strip().lower()
+        tentativa = 1
+        path: Path | None = None
+        while True:
+            try:
+                path, calculado = self._baixar_payload_uma_vez(key)
+            except (BotoCoreError, ClientError) as erro:
+                retryavel, eh_throttle = _classificar_erro(erro)
+                if not retryavel or tentativa >= self.config.s3_retry_max_attempts:
+                    raise
+                if eh_throttle:
+                    self.retries_throttle += 1
+                atraso = min(
+                    self.config.s3_retry_max_delay_seconds,
+                    self.config.s3_retry_base_delay_seconds * (2 ** (tentativa - 1)),
+                ) * random.uniform(0.7, 1.3)
+                log.warning(
+                    "retry %d/%d em %s (%s), aguardando %.2fs",
+                    tentativa,
+                    self.config.s3_retry_max_attempts,
+                    key,
+                    type(erro).__name__,
+                    atraso,
+                )
+                time.sleep(max(0.0, atraso))
+                tentativa += 1
+                continue
+            break
+
+        try:
+            if calculado.lower() != esperado:
+                raise ErroIntegridade(
+                    f"md5 divergente em {key}: manifest={esperado} "
+                    f"calculado={calculado}"
+                )
+            yield path
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+    def _baixar_payload_uma_vez(self, key: str) -> tuple[Path, str]:
+        path: Path | None = None
+        body = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", suffix=".json.gz", delete=False
+            ) as temporario:
+                path = Path(temporario.name)
+                resposta = self.cliente.get_object(
+                    Bucket=self.config.bucket, Key=key
+                )
+                body = resposta["Body"]
+                digest = hashlib.md5()  # noqa: S324 - checksum oficial do Tenable
+                for bloco in body.iter_chunks(chunk_size=CHUNK_PAYLOAD):
+                    if not bloco:
+                        continue
+                    temporario.write(bloco)
+                    digest.update(bloco)
+            return path, digest.hexdigest()
+        except Exception:
+            if path is not None:
+                path.unlink(missing_ok=True)
+            raise
+        finally:
+            if body is not None and hasattr(body, "close"):
+                try:
+                    body.close()
+                except Exception:
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+                    raise
 
 
 # ===========================================================================

@@ -26,10 +26,9 @@ from .payload import (
     LinhaFinding,
     LinhaPlugin,
     LinhaRecast,
-    PayloadAchatado,
-    achatar_payload,
     colunas,
 )
+from .streaming import PayloadStream
 
 log = logging.getLogger(__name__)
 
@@ -143,10 +142,15 @@ class Ingestor:
             raise
 
         resultado.manifests_lidos += 1
-        if manifest.payload_type and manifest.payload_type != tipo.nome:
-            log.warning(
-                "manifest %s declara payload_type=%s, esperado %s; seguindo pelo diretório",
-                key, manifest.payload_type, tipo.nome,
+        if manifest.tipo != tipo.tipo_manifest:
+            raise ErroIntegridade(
+                f"manifest {key}: type={manifest.tipo!r}, esperado "
+                f"{tipo.tipo_manifest!r}"
+            )
+        if manifest.payload_type != tipo.nome:
+            raise ErroIntegridade(
+                f"manifest {key}: payload_type={manifest.payload_type!r}, esperado "
+                f"{tipo.nome!r}"
             )
 
         estados = self._estados_conhecidos([e.path for e in manifest.payloads])
@@ -226,62 +230,33 @@ class Ingestor:
                 if registro is not None and registro["status"] == STATUS_OK and not forcar:
                     log.warning("payload já processado, pulando: %s", entrada.path)
                     return ResultadoPayload(entrada.path, STATUS_PULADO)
-                achatado = self._carregar(entrada, tipo)
-                eventos = self._aplicar(achatado, entrada, manifest, tipo, modo)
-                self._marcar_ok(entrada, manifest, tipo, achatado, eventos, modo)
+                with self.cliente.baixar_payload(entrada.path, entrada.md5) as path:
+                    stream = PayloadStream(path, tipo, entrada)
+                    eventos = self._aplicar(stream, entrada, manifest, tipo, modo)
+                    self._conferir_versao(entrada, tipo, stream.version)
+                    self._marcar_ok(entrada, manifest, tipo, stream, eventos, modo)
         except (ErroIntegridade, ErroParse) as erro:
             return self._marcar_falha(entrada, manifest, tipo, modo, erro)
         except Exception:  # noqa: BLE001 - falha operacional deve abortar o job
             log.exception("falha inesperada em %s", entrada.path)
             raise
 
-        registros = achatado.registros_lidos
+        registros = stream.registros_lidos
         log.info(
             "%s | %d registro(s), %d evento(s), %.2fs",
             entrada.path, registros, eventos, time.monotonic() - inicio,
         )
         return ResultadoPayload(entrada.path, STATUS_OK, registros, eventos)
 
-    def _carregar(self, entrada: EntradaPayload, tipo: TipoPayload) -> PayloadAchatado:
-        dados = self.cliente.baixar(entrada.path)
-        s3mod.validar_md5(dados, entrada.md5, entrada.path)
-        doc = s3mod.ler_documento(dados, entrada.path)
-
-        achatado = achatar_payload(tipo, doc, entrada)
-        self._conferir_contagens(entrada, achatado)
-        self._conferir_versao(entrada, tipo, achatado)
-        return achatado
-
-    def _conferir_contagens(
-        self, entrada: EntradaPayload, achatado: PayloadAchatado
-    ) -> None:
-        """Seção 12.3: contagem divergente costuma ser download truncado."""
-        if (
-            entrada.num_updates is not None
-            and achatado.num_updates != entrada.num_updates
-        ):
-            raise ErroIntegridade(
-                f"{entrada.path}: manifest diz {entrada.num_updates} update(s), "
-                f"payload trouxe {achatado.num_updates}"
-            )
-        if (
-            entrada.num_deletes is not None
-            and achatado.num_deletes != entrada.num_deletes
-        ):
-            raise ErroIntegridade(
-                f"{entrada.path}: manifest diz {entrada.num_deletes} delete(s), "
-                f"payload trouxe {achatado.num_deletes}"
-            )
-
     def _conferir_versao(
-        self, entrada: EntradaPayload, tipo: TipoPayload, achatado: PayloadAchatado
+        self, entrada: EntradaPayload, tipo: TipoPayload, versao: int
     ) -> None:
         """Seção 12.4: versão divergente ALERTA mas NÃO interrompe.
 
         É o aviso antecipado de que o parser vai quebrar; a mudança pode ser
         aditiva e inofensiva, então parar a fila seria pior."""
         esperada = self.config.versao_esperada(tipo.nome)
-        recebida = achatado.version if achatado.version is not None else entrada.version
+        recebida = versao
         if esperada is not None and recebida is not None and recebida != esperada:
             log.error(
                 "ALERTA schema: %s veio na versão %s, esperada %s (%s) — seguindo",
@@ -290,7 +265,7 @@ class Ingestor:
 
     def _aplicar(
         self,
-        achatado: PayloadAchatado,
+        stream: PayloadStream,
         entrada: EntradaPayload,
         manifest: Manifest,
         tipo: TipoPayload,
@@ -300,11 +275,30 @@ class Ingestor:
         with self.conn.cursor() as cur:
             cur.execute(carregar_sql("00_staging"))
 
-            _copiar(cur, "stg_finding", LinhaFinding, achatado.findings)
-            _copiar(cur, "stg_plugin", LinhaPlugin, achatado.plugins)
-            _copiar(cur, "stg_recast", LinhaRecast, achatado.recasts)
+            findings_copiados = _copiar(
+                cur, "stg_finding", LinhaFinding, stream.iter_findings()
+            )
+            plugins_copiados = _copiar(
+                cur, "stg_plugin", LinhaPlugin, stream.iter_plugins()
+            )
+            recasts_copiados = _copiar(
+                cur, "stg_recast", LinhaRecast, stream.iter_recasts()
+            )
 
-            if achatado.findings:
+            stream.validar_contagens()
+            copiados = (findings_copiados, plugins_copiados, recasts_copiados)
+            mapeados = (
+                stream.findings_mapeados,
+                stream.plugins_mapeados,
+                stream.recasts_mapeados,
+            )
+            if copiados != mapeados:
+                raise RuntimeError(
+                    f"{entrada.path}: invariante de COPY violada: "
+                    f"copiados={copiados}, mapeados={mapeados}"
+                )
+
+            if findings_copiados:
                 if modo == MODO_INCREMENTAL:
                     # Antes do dedup, de propósito (seção 6.3): se um finding
                     # abriu e fechou dentro da mesma janela de 15 minutos,
@@ -315,12 +309,12 @@ class Ingestor:
                     )
                     eventos = max(cur.rowcount, 0)
                 cur.execute(carregar_sql("10_dedup"))
-                if achatado.plugins:
+                if plugins_copiados:
                     cur.execute(carregar_sql("30_upsert_plugin"))
                 cur.execute(carregar_sql("40_upsert_current"))
                 cur.execute(carregar_sql("45_apply_deletes"))
 
-            if achatado.recasts:
+            if recasts_copiados:
                 cur.execute(carregar_sql("50_upsert_recast"))
         return eventos
 
@@ -329,7 +323,7 @@ class Ingestor:
         entrada: EntradaPayload,
         manifest: Manifest,
         tipo: TipoPayload,
-        achatado: PayloadAchatado,
+        stream: PayloadStream,
         eventos: int,
         modo: str,
     ) -> None:
@@ -341,10 +335,10 @@ class Ingestor:
                     "payload_type": tipo.nome,
                     "manifest_path": manifest.path,
                     "md5": entrada.md5,
-                    "schema_version": achatado.version or entrada.version,
+                    "schema_version": stream.version,
                     "num_updates": entrada.num_updates,
                     "num_deletes": entrada.num_deletes,
-                    "rows_read": achatado.registros_lidos,
+                    "rows_read": stream.registros_lidos,
                     "events_generated": eventos,
                     "first_record_timestamp": entrada.first_record_timestamp,
                     "last_record_timestamp": entrada.last_record_timestamp,
@@ -381,6 +375,9 @@ class Ingestor:
                         "schema_version": entrada.version,
                         "num_updates": entrada.num_updates,
                         "num_deletes": entrada.num_deletes,
+                        "first_record_timestamp": entrada.first_record_timestamp,
+                        "last_record_timestamp": entrada.last_record_timestamp,
+                        "scan_id": entrada.scan_id,
                         "error_message": mensagem[:4000],
                         "mode": modo,
                         "max_attempts": self.config.max_attempts,

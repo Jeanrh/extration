@@ -163,6 +163,8 @@ class FakeS3:
 
     def __init__(self, store: dict[str, bytes]):
         self.store = store
+        self.body: _Corpo | None = None
+        self.bodies: list[_Corpo] = []
 
     def get_paginator(self, _nome: str):
         return _Paginator(self.store)
@@ -170,15 +172,37 @@ class FakeS3:
     def get_object(self, Bucket: str, Key: str):  # noqa: N803 - assinatura do boto3
         if Key not in self.store:
             raise KeyError(Key)
-        return {"Body": _Corpo(self.store[Key])}
+        self.body = _Corpo(self.store[Key])
+        self.bodies.append(self.body)
+        return {"Body": self.body}
 
 
 class _Corpo:
     def __init__(self, dados: bytes):
         self._dados = dados
+        self._posicao = 0
+        self.read_sizes: list[int] = []
+        self.closed = False
 
-    def read(self) -> bytes:
-        return self._dados
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        if size < 0:
+            fim = len(self._dados)
+        else:
+            fim = min(self._posicao + size, len(self._dados))
+        bloco = self._dados[self._posicao:fim]
+        self._posicao = fim
+        return bloco
+
+    def iter_chunks(self, chunk_size: int):
+        while True:
+            bloco = self.read(chunk_size)
+            if not bloco:
+                return
+            yield bloco
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _Paginator:
