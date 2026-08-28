@@ -155,6 +155,7 @@ class Ingestor:
             estados.get(e.path) == STATUS_OK for e in manifest.payloads
         ):
             log.debug("manifest %s já totalmente processado", key)
+            resultado.payloads_pulados += len(manifest.payloads)
             return restante
 
         # ORDEM DO ARRAY É OBRIGATÓRIA — não reordenar, não paralelizar.
@@ -211,15 +212,28 @@ class Ingestor:
         manifest: Manifest,
         tipo: TipoPayload,
         modo: str,
+        forcar: bool = False,
     ) -> ResultadoPayload:
         inicio = time.monotonic()
         try:
             with self.conn.transaction():
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM ingest_file WHERE path = %s FOR UPDATE",
+                        (entrada.path,),
+                    )
+                    registro = cur.fetchone()
+                if registro is not None and registro["status"] == STATUS_OK and not forcar:
+                    log.info("payload já processado, pulando: %s", entrada.path)
+                    return ResultadoPayload(entrada.path, STATUS_PULADO)
                 achatado = self._carregar(entrada, tipo)
                 eventos = self._aplicar(achatado, entrada, manifest, tipo, modo)
                 self._marcar_ok(entrada, manifest, tipo, achatado, eventos, modo)
-        except Exception as erro:  # noqa: BLE001 - a fila não pode travar
+        except (ErroIntegridade, ErroParse) as erro:
             return self._marcar_falha(entrada, manifest, tipo, modo, erro)
+        except Exception:  # noqa: BLE001 - falha operacional deve abortar o job
+            log.exception("falha inesperada em %s", entrada.path)
+            raise
 
         registros = achatado.registros_lidos
         log.info(
@@ -397,7 +411,7 @@ class Ingestor:
             cur.execute(
                 "SELECT payload_type, manifest_path, md5, schema_version, "
                 "       num_updates, num_deletes, first_record_timestamp, "
-                "       last_record_timestamp, scan_id "
+                "       last_record_timestamp, scan_id, mode "
                 "FROM ingest_file WHERE path = %s",
                 (path,),
             )
@@ -429,7 +443,9 @@ class Ingestor:
             payload_type=tipo.nome,
             payloads=(entrada,),
         )
-        return self.processar_payload(entrada, manifest, tipo, self.modo_atual())
+        return self.processar_payload(
+            entrada, manifest, tipo, registro["mode"], forcar=True
+        )
 
     # ------------------------------------------------------------------
     def _registrar_execucao(self, resultado: ResultadoCiclo) -> None:

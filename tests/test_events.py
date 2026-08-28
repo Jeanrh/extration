@@ -8,10 +8,13 @@ descartável; sem ela os testes são pulados.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 
 from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
+from ingestion.config import TIPOS_PAYLOAD
+from ingestion.manifest import parse_manifest
 
 pytestmark = pytest.mark.banco
 
@@ -77,6 +80,28 @@ def test_seed_grava_o_modo_em_ingest_file(ingestor, conn):
     assert linha["mode"] == "SEED"
     assert linha["status"] == "OK"
     assert linha["rows_read"] == 1
+
+
+def test_erro_de_programacao_nao_registra_retry_ou_quarentena(ingestor, conn, monkeypatch):
+    """Só conteúdo inválido pode avançar o ledger de tentativas do arquivo."""
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    manifest_path = bucket.fechar_manifest("FINDING")
+    manifest = parse_manifest(manifest_path, json.loads(bucket.store[manifest_path]))
+    entrada = manifest.payloads[0]
+    ing = ingestor(bucket.store)
+
+    def falhar_no_banco(*_args):
+        raise RuntimeError("sql bug")
+
+    monkeypatch.setattr(ing, "_aplicar", falhar_no_banco)
+
+    with pytest.raises(RuntimeError, match="sql bug"):
+        ing.processar_payload(entrada, manifest, TIPOS_PAYLOAD["FINDING"], "SEED")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM ingest_file WHERE path = %s", (entrada.path,))
+        assert cur.fetchone() is None
 
 
 # ---------------------------------------------------------------------------
@@ -669,3 +694,18 @@ def test_payload_ja_processado_e_pulado(ingestor, conn):
     assert primeiro.payloads_ok == 1
     assert segundo.payloads_ok == 0
     assert segundo.payloads_pulados == 1
+
+
+def test_manifest_totalmente_ok_soma_todos_os_payloads_sem_consumir_limite(ingestor, conn):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f2")]))
+    bucket.fechar_manifest("FINDING")
+    ing = ingestor(bucket.store)
+
+    primeiro = ing.executar(modo="INCREMENTAL")
+    segundo = ing.executar(modo="INCREMENTAL", limite=1)
+
+    assert primeiro.payloads_ok == 2
+    assert segundo.payloads_ok == 0
+    assert segundo.payloads_pulados == 2

@@ -11,9 +11,13 @@ Precisa de PostgreSQL (`TEST_PG_DSN`); sem ela é pulado.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
+from ingestion.config import TIPOS_PAYLOAD
+from ingestion.manifest import parse_manifest
 
 pytestmark = pytest.mark.banco
 
@@ -211,3 +215,49 @@ def test_reprocess_manual_de_um_payload_e_idempotente(ingestor, conn):
     resultado = ing.reprocessar(caminho)
     assert resultado.status == "OK"
     assert _instantaneo(conn) == antes
+
+
+def test_reprocesso_preserva_modo_original_incremental(ingestor, conn):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    bucket.fechar_manifest("FINDING")
+    ing = ingestor(bucket.store)
+    ing.executar(modo="INCREMENTAL")
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SELECT path FROM ingest_file")
+        caminho = cur.fetchone()["path"]
+        cur.execute("UPDATE pipeline_control SET mode = 'SEED' WHERE id = 1")
+
+    resultado = ing.reprocessar(caminho)
+
+    assert resultado.status == "OK"
+    with conn.cursor() as cur:
+        cur.execute("SELECT mode FROM ingest_file WHERE path = %s", (caminho,))
+        assert cur.fetchone()["mode"] == "INCREMENTAL"
+
+
+def test_payload_ok_e_pulado_transacionalmente_mas_forcar_reprocessa(ingestor, conn):
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [finding_vm(finding_id="f1")]))
+    manifest_path = bucket.fechar_manifest("FINDING")
+    manifest = parse_manifest(manifest_path, json.loads(bucket.store[manifest_path]))
+    entrada = manifest.payloads[0]
+    ing = ingestor(bucket.store)
+    tipo = TIPOS_PAYLOAD["FINDING"]
+
+    assert ing.processar_payload(entrada, manifest, tipo, "SEED").status == "OK"
+
+    original_baixar = ing.cliente.baixar
+
+    def download_indevido(_path):
+        raise AssertionError("payload OK não deve ser baixado sem forçar")
+
+    ing.cliente.baixar = download_indevido
+    assert ing.processar_payload(entrada, manifest, tipo, "SEED").status == "SKIPPED"
+    ing.cliente.baixar = original_baixar
+
+    assert ing.processar_payload(entrada, manifest, tipo, "SEED", forcar=True).status == "OK"
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM ingest_file WHERE path = %s", (entrada.path,))
+        assert cur.fetchone()["attempt_count"] == 2
