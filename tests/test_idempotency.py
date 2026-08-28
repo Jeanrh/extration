@@ -1,0 +1,162 @@
+"""Teste de idempotência obrigatório (SPEC seção 10.1).
+
+    1. Rodar ingestão completa sobre um conjunto de payloads
+    2. Registrar: count(finding_current), count(finding_event), checksum de estado
+    3. Limpar ingest_file (apenas ela)
+    4. Rodar a ingestão exatamente igual de novo
+    5. Os três valores DEVEM ser idênticos
+
+Precisa de PostgreSQL (`TEST_PG_DSN`); sem ela é pulado.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from fixtures import Bucket, envelope, enriched, finding_vm, finding_was
+
+pytestmark = pytest.mark.banco
+
+
+def _cenario() -> Bucket:
+    """Um bucket com as quatro situações que mexem em estado: abertura,
+    fechamento, reabertura, exclusão — mais WAS e recast."""
+    bucket = Bucket()
+    bucket.adicionar("FINDING", envelope("FINDING", [
+        finding_vm(finding_id="abre", indexed="2026-08-20T10:00:00Z"),
+        finding_vm(finding_id="fecha", indexed="2026-08-20T10:00:00Z"),
+        finding_vm(finding_id="some", indexed="2026-08-20T10:00:00Z"),
+        finding_vm(finding_id="reabre", state="FIXED",
+                   last_fixed="2026-08-19T00:00:00Z", indexed="2026-08-20T10:00:00Z"),
+    ]))
+    bucket.adicionar("FINDING", envelope("FINDING", [
+        finding_vm(finding_id="fecha", state="FIXED",
+                   last_fixed="2026-08-21T09:00:00Z", indexed="2026-08-21T10:00:00Z"),
+        finding_vm(finding_id="reabre", state="REOPENED",
+                   resurfaced_date="2026-08-21T08:00:00Z", indexed="2026-08-21T10:00:00Z"),
+    ], [{"_id": "some", "deleted_at": "2026-08-21T11:00:00Z"}]))
+    bucket.adicionar("WAS_FINDING", envelope("WAS_FINDING", [
+        finding_was(finding_id="was1", indexed_at="2026-08-21T12:00:00Z"),
+    ]))
+    bucket.adicionar(
+        "FINDING_ENRICHED_ATTRIBUTES",
+        envelope("FINDING_ENRICHED_ATTRIBUTES", [enriched(finding_id="abre")]),
+    )
+    for tipo in ("FINDING", "WAS_FINDING", "FINDING_ENRICHED_ATTRIBUTES"):
+        bucket.fechar_manifest(tipo)
+    return bucket
+
+
+def _instantaneo(conn) -> dict:
+    """Contagens + checksum. O checksum é sobre a linha inteira (`t::text`),
+    então qualquer coluna que mexesse sozinha — inclusive `last_ingested_at` —
+    apareceria como diferença."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS total FROM finding_current")
+        findings = cur.fetchone()["total"]
+        cur.execute("SELECT count(*) AS total FROM finding_event")
+        eventos = cur.fetchone()["total"]
+        cur.execute(
+            "SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t.finding_id), '')) AS h "
+            "FROM finding_current t"
+        )
+        checksum_estado = cur.fetchone()["h"]
+        cur.execute(
+            "SELECT md5(coalesce(string_agg("
+            "  finding_id || event_type || occurred_at::text, '|' "
+            "  ORDER BY finding_id, event_type, occurred_at), '')) AS h "
+            "FROM finding_event"
+        )
+        checksum_eventos = cur.fetchone()["h"]
+        cur.execute(
+            "SELECT md5(coalesce(string_agg(p::text, '|' ORDER BY p.plugin_id), '')) AS h "
+            "FROM plugin p"
+        )
+        checksum_plugin = cur.fetchone()["h"]
+    return {
+        "findings": findings,
+        "eventos": eventos,
+        "estado": checksum_estado,
+        "eventos_hash": checksum_eventos,
+        "plugin": checksum_plugin,
+    }
+
+
+@pytest.mark.parametrize("modo", ["SEED", "INCREMENTAL"])
+def test_reprocessar_tudo_produz_estado_identico(ingestor, conn, modo):
+    bucket = _cenario()
+
+    ingestor(bucket.store).executar(modo=modo)
+    antes = _instantaneo(conn)
+    assert antes["findings"] > 0
+
+    # limpa APENAS ingest_file: some a camada 1 (idempotência de arquivo) e a
+    # garantia passa a depender das camadas 3 e 4 — a guarda `>` estrita no
+    # upsert e o índice único de evento.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("DELETE FROM ingest_file")
+
+    ingestor(bucket.store).executar(modo=modo)
+    depois = _instantaneo(conn)
+
+    assert depois == antes
+
+
+def test_terceira_passada_tambem_nao_move_nada(ingestor, conn):
+    bucket = _cenario()
+    ingestor(bucket.store).executar(modo="INCREMENTAL")
+    referencia = _instantaneo(conn)
+
+    for _ in range(2):
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute("DELETE FROM ingest_file")
+        ingestor(bucket.store).executar(modo="INCREMENTAL")
+        assert _instantaneo(conn) == referencia
+
+
+def test_nenhum_finding_id_duplicado(ingestor, conn):
+    """Critério de aceite: nenhum finding_id duplicado em finding_current.
+
+    A PK já garante; o teste existe para o critério ficar verificado por código
+    e não por confiança no DDL."""
+    bucket = _cenario()
+    ingestor(bucket.store).executar(modo="INCREMENTAL")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS total FROM ("
+            "  SELECT finding_id FROM finding_current GROUP BY 1 HAVING count(*) > 1"
+            ") d"
+        )
+        assert cur.fetchone()["total"] == 0
+
+
+def test_todo_evento_tem_occurred_at_vindo_do_dado(ingestor, conn):
+    """Critério de aceite: occurred_at nunca é o relógio do job.
+
+    Os payloads do cenário são datados de agosto/2026 e antes; nenhum evento
+    pode estar datado com o `now()` da execução."""
+    bucket = _cenario()
+    ingestor(bucket.store).executar(modo="INCREMENTAL")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS total FROM finding_event "
+            "WHERE occurred_at > now() - interval '1 minute'"
+        )
+        assert cur.fetchone()["total"] == 0
+        cur.execute("SELECT count(*) AS total FROM finding_event WHERE detected_at IS NULL")
+        assert cur.fetchone()["total"] == 0
+
+
+def test_reprocess_manual_de_um_payload_e_idempotente(ingestor, conn):
+    bucket = _cenario()
+    ing = ingestor(bucket.store)
+    ing.executar(modo="INCREMENTAL")
+    antes = _instantaneo(conn)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT path FROM ingest_file ORDER BY path LIMIT 1")
+        caminho = cur.fetchone()["path"]
+
+    resultado = ing.reprocessar(caminho)
+    assert resultado.status == "OK"
+    assert _instantaneo(conn) == antes

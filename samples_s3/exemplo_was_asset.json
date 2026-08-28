@@ -1,0 +1,53 @@
+{
+  "payload_id": "was_asset-1787831476099-4",
+  "version": 1,
+  "type": "WAS_ASSET",
+  "count_updated": 1,
+  "count_deleted": 0,
+  "updates": [
+    {
+      "id": "3deb0c81-f63c-4240-bf47-88dee202f4a1",
+      "has_agent": false,
+      "has_plugin_results": false,
+      "is_licensed": true,
+      "types": [
+        "webapp"
+      ],
+      "is_public": true,
+      "sources": [
+        {
+          "name": "WAS",
+          "first_seen": "2024-11-10T02:00:08.948Z",
+          "last_seen": "2026-08-27T10:19:17.605Z"
+        }
+      ],
+      "network": {
+        "network_id": "00000000-0000-0000-0000-000000000000",
+        "network_name": "Default",
+        "ipv4s": [
+          "23.62.50.190"
+        ],
+        "fqdns": [
+          "meucheckoutsandbox.braspag.com.br"
+        ]
+      },
+      "scan": {
+        "first_scan_time": "2024-11-10T02:00:08.948Z",
+        "last_scan_time": "2026-08-27T10:19:17.605Z",
+        "last_licensed_scan_date": "2026-08-27T10:19:17.605Z",
+        "last_scan_id": "4d27f7f6-6f2a-4c27-8f78-9a89e566dd74"
+      },
+      "timestamps": {
+        "created_at": "2024-11-08T01:00:56.000Z",
+        "updated_at": "2026-08-27T11:51:12.019Z",
+        "first_seen": "2024-11-10T02:00:08.948Z",
+        "last_seen": "2026-08-27T10:19:17.605Z"
+      },
+      "acr_score": "7",
+      "exposure_score": "817"
+    }
+  ],
+  "deletes": [],
+  "first_ts": "1787831472037",
+  "last_ts": "1787831472037"
+}
