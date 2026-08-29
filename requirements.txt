@@ -6,3 +6,7 @@ psycopg[binary]>=3.2
 alembic>=1.14
 SQLAlchemy>=2.0
 ijson>=3.3
+# requests/urllib3: o motor de risco fala com o CMDB (JSM/Assets), com o Vault
+# e com a API classica do Tenable — as tres fontes que o Data Stream nao cobre.
+requests>=2.32
+urllib3>=2.2
