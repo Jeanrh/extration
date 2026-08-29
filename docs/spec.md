@@ -66,8 +66,13 @@ Stream até um banco PostgreSQL, garantindo:
 - Retenção e expurgo de histórico
 - Views de consumo (contrato de leitura para os consumidores)
 
-**Fora do escopo (ver seção 17):** API REST, dashboard, motor de recálculo de
-risco, crawler de tickets, controle de acesso dos consumidores.
+**Fora do escopo (ver seção 17):** API REST, dashboard, crawler de tickets,
+controle de acesso dos consumidores.
+
+O **motor de recálculo de risco** continua fora do escopo *desta* spec, mas
+não é mais um módulo futuro: vive em `risk/`, como CronJob separado, e tem
+documento próprio em [motor.md](motor.md). A regra da seção 3.2 não muda —
+a ingestão segue sem nenhum cálculo de risco.
 
 ### 1.3 Consumidores do banco
 
@@ -98,7 +103,7 @@ Este projeto entrega o dado e o contrato de leitura, não os consumidores.
 | **T (data de corte)** | Momento em que o backfill termina e o stream passa a entregar apenas o fluxo corrente. A partir de T, eventos são confiáveis. |
 | **Modo seed** | Modo de operação que popula estado sem gerar eventos. Usado durante o backfill. |
 | **Modo incremental** | Modo de operação normal, que gera eventos. Usado a partir de T. |
-| **Motor de risco** | Componente externo a este projeto que recalcula a severidade segundo regras próprias da empresa (matriz de quadrantes Q1–Q16). **Não pode ser alterado por este projeto.** |
+| **Motor de risco** | Subsistema que recalcula a severidade segundo regras próprias da empresa (matriz de quadrantes Q1–Q16), sobre **todos** os findings e sem filtro de tempo. Vive em `risk/` e roda como CronJob separado — ver [motor.md](motor.md). **O job de ingestão não o executa nem o altera.** |
 | **Recast** | Ação humana no Tenable que altera a severidade de um finding (recast) ou aceita o risco (accept). |
 
 ---
@@ -121,15 +126,18 @@ Este projeto entrega o dado e o contrato de leitura, não os consumidores.
 ┌─────────────────────────────────────────┐
 │  JOB DE INGESTÃO  (CronJob no EKS)      │
 │  ┌───────────────────────────────────┐  │
-│  │ 1. Ingestão fiel                  │  │  ◄── ESTE PROJETO
+│  │ Ingestão fiel                     │  │  ◄── ESTE PROJETO
 │  │    manifest → payload → COPY →    │  │
 │  │    eventos → upsert               │  │
-│  └───────────────┬───────────────────┘  │
-│                  ▼                       │
-│  ┌───────────────────────────────────┐  │
-│  │ 2. Motor de risco (módulo futuro) │  │  ◄── fora de escopo,
-│  │    lê finding_current →           │  │      mas o schema
-│  │    escreve finding_risk           │  │      precisa suportá-lo
+│  └───────────────────────────────────┘  │
+└──────────────────┬──────────────────────┘
+                   │
+┌──────────────────┼──────────────────────┐
+│  JOB DO MOTOR    │  (CronJob separado)   │
+│  ┌───────────────▼───────────────────┐  │  ◄── risk/ — ver motor.md
+│  │ lê finding_current + plugin,      │  │      cadência própria para
+│  │ cruza com CMDB/Vault/intel →      │  │      que mudar um peso não
+│  │ escreve finding_risk              │  │      arraste a ingestão
 │  └───────────────────────────────────┘  │
 └──────────────────┬──────────────────────┘
                    ▼
@@ -149,26 +157,29 @@ Este projeto entrega o dado e o contrato de leitura, não os consumidores.
 mandou. Não calcula risco, não reclassifica, não enriquece, não faz join com
 CMDB.
 
-Motivo: o motor de risco entra depois, como etapa separada dentro do mesmo job.
-Se a ingestão calculasse risco, uma mudança de fórmula exigiria reingerir todo o
-histórico do S3. Com a separação, muda-se a fórmula e recalcula-se apenas a
-tabela de risco.
+Motivo: o motor de risco roda depois, em job próprio. Se a ingestão calculasse
+risco, uma mudança de fórmula exigiria reingerir todo o histórico do S3. Com a
+separação, muda-se a fórmula e recalcula-se apenas a tabela de risco.
 
 **Consequência obrigatória:** o job de ingestão **NÃO DEVE** ter nenhum código
 de cálculo de severidade, score, quadrante ou classificação de negócio.
 
 ### 3.3 Ordem de execução dentro do job
 
-O job roda uma vez por dia e executa, em sequência:
+O job de ingestão roda uma vez por dia e executa, em sequência:
 
-1. **Ingestão** (este projeto) — lê S3, popula `finding_current`, `finding_event`,
-   `plugin`, `finding_recast`
-2. **Motor de risco** (módulo futuro) — lê `finding_current`, escreve `finding_risk`
-3. **Manutenção** — cria partição do mês seguinte se necessário, expurga
+1. **Ingestão** — lê S3, popula `finding_current`, `finding_event`, `plugin`,
+   `finding_recast`
+2. **Manutenção** — cria partição do mês seguinte se necessário, expurga
    partições vencidas, publica métricas
 
-Quando o job termina, o dado está completo e pronto para consumo. Não existe
-fluxo de ida-e-volta (extrair do banco, processar fora, devolver).
+O **motor de risco** roda em CronJob próprio, agendado com folga depois deste —
+a justificativa da separação está em [motor.md §3.1](motor.md). Nenhum dos dois
+faz ida-e-volta: não se extrai do banco para processar fora e devolver.
+
+Consequência a assumir: existe uma janela em que `finding_current` já está
+fresco e `finding_risk` ainda não. Quem consome enxerga essa idade em
+`finding_risk.computed_at`.
 
 ---
 
@@ -651,8 +662,11 @@ reingerir o S3.
 **Por que `finding_risk` existe desde o dia 1 mesmo vazia.** O Tenable não é a
 fonte de verdade de risco desta empresa. Sem o risco recalculado no banco, não
 existe query possível para "traga as críticas" — nem para o dashboard, nem para
-o ticket, nem para a IA. A tabela nasce vazia e é preenchida quando o motor
-plugar; até lá, as views caem no `severity` nativo.
+o ticket, nem para a IA. A tabela nasceu vazia aqui e passou a ser preenchida
+pelo motor (`risk/`), que a expandiu na migração `0005` com as oito notas, a
+prioridade, o SLA e o contexto que produziu tudo isso — ver
+[motor.md §4.1](motor.md). Enquanto o motor não tiver rodado num banco, as
+views continuam caindo no `severity` nativo.
 
 ### 5.4 Chave natural (`natural_key`)
 
@@ -1711,9 +1725,10 @@ O sistema **NÃO DEVE** implementar nada desta lista. Se surgir necessidade,
 |---|---|
 | API REST sobre o banco | outro time |
 | Dashboard web | outro time (em andamento em paralelo) |
-| **Motor de recálculo de risco** | existe hoje; **não pode ser alterado por este projeto**; entra como etapa 2 do job lendo `finding_current` e escrevendo `finding_risk` |
+| **Motor de recálculo de risco** | implementado em `risk/`, como CronJob separado ([motor.md](motor.md)). Fora do escopo **deste job**: a ingestão não o executa, não o importa e não calcula risco |
 | Crawler de tickets Jira | outro time; lê `finding_current` e compara com o Jira por `finding_id` |
-| Enriquecimento com CMDB/Jira (sigla, time, unidade de negócio) | etapa posterior |
+| Enriquecimento com CMDB (sigla, time, unidade de negócio) | feito pelo motor, em tabelas próprias ([motor.md §4.2](motor.md)); a ingestão segue sem join com CMDB |
+| Enriquecimento com Jira e marcações de negócio | ainda sem dono |
 | Controle de acesso, mascaramento, auditoria de leitura | quem constrói em cima do banco |
 | Ingestão de `asset`, `was_asset`, `tags`, `asset_enriched_attributes`, `host_audit_finding` | fase futura, se necessário |
 | Geração do CSV do Power BI | script separado, já previsto |
@@ -1766,7 +1781,7 @@ Resumo do que foi decidido e por quê. Serve para não reabrir discussão.
 | Evento datado pelo dado | datado pela ingestão | "quando fechou" ≠ "quando meu job viu fechar" |
 | `finding_event` particionada | tabela simples | expurgo por `DROP` em vez de `DELETE` de milhões |
 | `finding_risk` separada | coluna no finding | cadência independente; `engine_version` auditável; motor intocado |
-| Motor acoplado no mesmo job | processo separado | dado sai pronto da rodada, sem ida-e-volta |
+| Motor em CronJob separado | acoplado no mesmo job | peso muda toda semana e recalcular não pode arrastar a ingestão; falha no scoring não pode barrar o dado; `engine_version` reverte sozinha (revisto — ver [motor.md §3.1](motor.md)) |
 | Ingestão sem cálculo de risco | ingestão enriquecida | mudança de fórmula não exige reingerir o S3 |
 | Whitelist de 3 tipos | loop genérico | evita `tds_test_file` e mistura de compliance |
 | UTC no banco, SP na leitura | converter na escrita | preserva referência original |

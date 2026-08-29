@@ -1,9 +1,20 @@
 # Tenable Data Stream → PostgreSQL
 
-Pipeline idempotente que ingere manifests e payloads do Tenable Vulnerability
-Management no PostgreSQL. Processa apenas `FINDING`, `WAS_FINDING` e
-`FINDING_ENRICHED_ATTRIBUTES`, preserva estado corrente e timeline de eventos,
-mantém quarentena e publica métricas operacionais.
+Dois subsistemas sobre o mesmo banco, em CronJobs separados.
+
+**Ingestão** (`ingestion/`) — pipeline idempotente que ingere manifests e
+payloads do Tenable Vulnerability Management no PostgreSQL. Processa apenas
+`FINDING`, `WAS_FINDING` e `FINDING_ENRICHED_ATTRIBUTES`, preserva estado
+corrente e timeline de eventos, mantém quarentena e publica métricas.
+Transcreve o Tenable fielmente e **não calcula risco**.
+
+**Motor de risco** (`risk/`) — recalcula a prioridade segundo o critério da
+empresa (matriz Q1–Q16) sobre **todos** os findings, em qualquer estado e
+**sem filtro de tempo**, cruzando o banco com CMDB, Vault, threat intel e um
+CSV de arquitetura. É o que o pipeline de CSV anterior não conseguia: lá, o
+export só enxerga uma janela de 30 dias (VM) e 7 dias (WAS), e o que fica fora
+carrega para sempre o score da última execução que o tocou — inclusive depois
+de a regra mudar.
 
 O destino de execução é um cluster EKS **já existente**. Criar cluster, VPC ou
 node groups não faz parte deste projeto.
@@ -12,21 +23,27 @@ node groups não faz parte deste projeto.
 
 ```
 ingestion/      pipeline: CLI, S3, manifest, payload, loader, métricas e SQL
-migrations/     Alembic + DDL versionada do schema
+risk/           motor de risco: contexto, derivações, scoring, executor e SQL
+migrations/     Alembic + DDL versionada do schema (comum aos dois)
 deploy/         base Kubernetes (CronJobs) e template de alarmes CloudWatch
 scripts/        harness de PostgreSQL descartável para os testes
 samples/        payloads de exemplo reais — fixtures da suíte
-tests/          suíte completa (186 testes)
-docs/           spec, runbook operacional e mapa de aceite
+tests/          suíte completa (339 testes)
+docs/           spec, motor, runbook operacional e mapa de aceite
 legacy/         exportador CSV anterior ao pipeline, mantido em separado
 main.py         entry point equivalente a `python -m ingestion.cli`
 ```
+
+O `risk/` se divide por **cardinalidade do domínio**, não por camada: resolver
+a camada tecnológica é caro por finding e barato por plugin, então isso roda
+uma vez por plugin (`derivacoes/`) e vira JOIN no scoring.
 
 ## Documentação
 
 | Documento | Para quê |
 |---|---|
-| [docs/spec.md](docs/spec.md) | A especificação completa: modelo de dados, regras de ingestão, motor de eventos, decisões arquiteturais. |
+| [docs/spec.md](docs/spec.md) | A especificação da ingestão: modelo de dados, regras, motor de eventos, decisões arquiteturais. |
+| [docs/motor.md](docs/motor.md) | O motor de risco: fronteira, fontes externas, as regras de scoring, as divergências herdadas e o estado de verificação. |
 | [docs/runbook.md](docs/runbook.md) | Operação do dia a dia: setup, seed, corte, quarentena, reprocesso, reconciliação, deploy, rollback e diagnóstico. |
 | [docs/acceptance.md](docs/acceptance.md) | Estado verificável dos nove critérios de aceite, com comando e evidência de cada um. |
 | [legacy/README.md](legacy/README.md) | O exportador CSV legado, que não participa do pipeline. |
@@ -53,6 +70,46 @@ O loader usa uma whitelist fixa de três tipos:
 
 `host_audit_finding` (compliance) e `tds_test_file` (teste de conectividade) não
 são ingeridos.
+
+## O motor de risco
+
+Roda em CronJob próprio, depois da ingestão. A separação é deliberada: peso,
+faixa de CVSS e mapa de camada mudam com frequência, e recalcular depois de um
+ajuste não pode arrastar o Data Stream junto — nem uma falha no scoring pode
+barrar a entrada do dado.
+
+```
+py = BIA·1.0 + PCI·1.0 + Exposição·1.0 + Arquitetura·1.5
+px = CVSS·1.0 + Ameaça·1.1 + Exploit·1.1 + Camada·0.8
+```
+
+Bandas em 100/200/300 nos dois eixos, cruzadas na grade Q1–Q16, com prazo de SLA
+por quadrante contado desde `first_found`. O resultado vai para `finding_risk`
+com **as oito notas gravadas**: sem elas, responder "por que este finding é
+Muito Alta?" exigiria reexecutar o motor, que a essa altura já pode estar com
+outros pesos.
+
+O banco fornece só os campos do Tenable. As outras quatro fontes continuam onde
+sempre estiveram, e **nenhuma delas derruba o motor** quando indisponível — o
+snapshot anterior no banco continua valendo:
+
+| Insumo | Origem | Sem ela |
+|---|---|---|
+| sigla, PCI, BIA, criticidade, unidade de negócio | CMDB (Atlassian Assets/JSM) | contexto de um ciclo atrás |
+| threat intel (`nota_threat`) | API clássica do Tenable (`cve_category`) | snapshot anterior preservado |
+| camada e família (`nota_layer`) | Vault + `plugin.family` | fallback por `plugin.family` |
+| arquitetura (`nota_arch`) | `risk/referencia/arquitetura.csv` | default 40 |
+
+O threat intel é a única que **não** pode migrar para o Data Stream:
+`cve_category` é um filtro do export clássico, não um campo — a resposta nunca
+diz a que categoria o finding pertence. [docs/motor.md](docs/motor.md) tem o
+mapeamento categoria a categoria e o motivo de cada uma não ter substituto.
+
+Gravar é proporcional à mudança real: o upsert usa `IS DISTINCT FROM`, então uma
+execução sem mudança de regra nem de contexto recalcula tudo e **escreve zero**.
+É o que impede meio milhão de tuplas mortas por dia. Quando o quadrante muda,
+sai um evento `RISK_CHANGED` em `finding_event` — a severidade que o negócio
+monitora é a do motor, não a do Tenable.
 
 ## Setup local
 
@@ -112,11 +169,21 @@ python -m ingestion.cli status
 python -m ingestion.cli quarantine
 python -m ingestion.cli reprocess --path <path-do-ledger>
 python -m ingestion.cli reconcile [--output ARQUIVO|-] [--console-vm-open N] [--console-was-open N]
+
+python -m risk.cli sync-context
+python -m risk.cli run
+python -m risk.cli status
 ```
 
 `reprocess` exige a key exata de um payload já existente em `ingest_file` e
 reutiliza o modo original do ledger. A reconciliação sem contagens do console
 grava `console_comparison: "NOT_PROVIDED"`; ela não inventa acesso ao Tenable.
+
+No motor, `run` **não** depende de `sync-context`: recalcula sobre o contexto já
+no banco. É deliberado — ajustar um peso e ver o efeito não pode exigir esperar
+JSM, Vault e a API clássica. Ao mudar uma regra, suba `RISK_ENGINE_VERSION`:
+ela fica gravada em cada linha de `finding_risk` e é o que distingue duas
+rodadas com fórmulas diferentes.
 
 ## Validação local
 
@@ -124,7 +191,7 @@ grava `console_comparison: "NOT_PROVIDED"`; ela não inventa acesso ao Tenable.
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pytest -q -m 'not banco'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-postgres.ps1 -PostgresBin 'C:\Program Files\PostgreSQL\18\bin' -Port 55489
-.\.venv\Scripts\python.exe -m compileall -q ingestion migrations tests
+.\.venv\Scripts\python.exe -m compileall -q ingestion risk migrations tests
 ```
 
 Use uma porta descartável livre, diferente de `5432`. Pytest sem `TEST_PG_DSN`,

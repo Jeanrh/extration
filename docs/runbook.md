@@ -1,6 +1,7 @@
 # Runbook operacional — ingestão Tenable Data Stream
 
-Este runbook cobre o pipeline PostgreSQL. O exportador CSV legado está descrito
+Este runbook cobre o pipeline PostgreSQL (seções 1 a 11) e o motor de risco
+(seção 12), que roda em CronJob separado. O exportador CSV legado está descrito
 separadamente no README e não participa desta operação.
 
 ## 1. Limites e pré-requisitos
@@ -15,7 +16,10 @@ VPC, subnets ou node groups. Antes de qualquer execução, confirme:
   seguro e workload identity via IRSA ou EKS Pod Identity;
 - política S3 limitada aos prefixes de manifests/payloads necessários e
   permissão CloudWatch quando `CLOUDWATCH_ENABLED=true`;
-- mecanismo de migração de HML/produção escolhido antes de habilitar CronJobs.
+- mecanismo de migração de HML/produção escolhido antes de habilitar CronJobs;
+- para o motor (seção 12): credenciais de CMDB (JSM), da API clássica do Tenable
+  e do Vault. Nenhuma é necessária para a ingestão, e a ausência de cada uma
+  degrada o motor de forma previsível em vez de derrubá-lo.
 
 Não registre DSN, credenciais, tokens, External ID, ARNs, Secrets, payloads,
 paths de quarentena ou relatórios de reconciliação reais no Git, tickets ou
@@ -327,7 +331,77 @@ Pendências empíricas permanecem visíveis: dono da reconciliação (P1), remo�
 recast no Tenable (P2), semântica de `indexed` no backfill (P3), divergência de
 contagens (P4) e frequência ideal após medir duração (P5).
 
-## 12. Referências oficiais
+## 12. Motor de risco
+
+O motor roda em **CronJob próprio**, agendado com folga depois da ingestão. Não
+é etapa do job de ingestão: mudar um peso e recalcular não pode arrastar o Data
+Stream junto, e uma falha no scoring não pode barrar a entrada do dado. A
+justificativa completa está em [motor.md §3.1](motor.md).
+
+### Ordem no dia
+
+```powershell
+python -m risk.cli sync-context   # CMDB, arquitetura, threat intel
+python -m risk.cli run            # deriva camadas e recalcula TUDO
+python -m risk.cli status         # confere idade do contexto e distribuição
+```
+
+`run` **não** depende de `sync-context`: recalcula sobre o contexto já no banco.
+É o que permite ajustar um peso e ver o efeito em segundos, sem esperar JSM,
+Vault e a API clássica.
+
+### Mudança de regra
+
+Peso, faixa de CVSS, mapa de camada e `arquitetura.csv` mudam com frequência.
+O procedimento é sempre o mesmo:
+
+1. edite `risk/scoring/pesos.py` (ou `risk/referencia/arquitetura.csv`);
+2. **suba `RISK_ENGINE_VERSION`** — é ela que fica gravada em cada linha e
+   permite saber com que versão um score foi produzido;
+3. rode `python -m risk.cli run`;
+4. confira o deslocamento em `status` e nos eventos `RISK_CHANGED`.
+
+Sem o passo 2, duas rodadas com fórmulas diferentes ficam indistinguíveis no
+banco.
+
+### Fonte externa fora do ar
+
+Nenhuma fonte derruba o motor. Cada uma registra o que houve em `context_sync`,
+e o snapshot anterior continua valendo — o motor prefere contexto de um ciclo
+atrás a contexto vazio, que produziria score plausível e silenciosamente errado.
+
+| Fonte | Comportamento | Efeito no score |
+|---|---|---|
+| CMDB (JSM) fora | busca falha antes de tocar as tabelas; snapshot anterior intacto | contexto até um ciclo defasado |
+| Sem credencial de CMDB | `sync-context` pula a fonte e loga aviso | idem |
+| `arquitetura.csv` ausente | `context_sync` marca `FAILED`, tabela zerada | `nota_arch` cai no default 40 |
+| Threat intel vazio ou em timeout | **não** zera a tabela | snapshot anterior preservado |
+| Vault fora | índice vazio | camada cai no fallback por `plugin.family` |
+
+O caso do threat intel merece atenção: o export clássico devolve lista vazia
+quando estoura o timeout de ~10 minutos. Zerar a tabela nessa situação
+rebaixaria toda vulnerabilidade de ameaça ativa para nota 10 de uma só vez.
+
+### Diagnóstico
+
+| Sintoma | Verificação | Ação segura |
+|---|---|---|
+| `run` grava 0 e você esperava mudança | esqueceu de subir `RISK_ENGINE_VERSION`? | o upsert só escreve o que mudou — sem mudança de regra nem de contexto, 0 é o correto |
+| Muita sigla vazia em `finding_risk` | `SELECT count(*) FROM finding_risk WHERE sigla = ''` | conferir `cmdb_server`/`cmdb_url` e o `synced_at` em `context_sync`; findings sem sigla caem nos defaults (BIA 50, PCI 10, arquitetura 40) |
+| Camada quase toda vazia | `SELECT resolved_by, count(*) FROM plugin_layer GROUP BY 1` | `nenhum` em massa indica Vault fora ou segredo mudado |
+| `nota_threat` desabou | `SELECT status, synced_at FROM context_sync WHERE source='THREAT_INTEL'` | export clássico falhou; o snapshot anterior deveria ter sido preservado |
+| Prioridade oscila sem ninguém mexer | eventos `RISK_CHANGED` e `context_synced_at` da linha | provável troca de snapshot do CMDB; comparar `synced_at` entre as rodadas |
+| `finding_risk` crescendo em disco | `n_dead_tup` em `pg_stat_user_tables` | tuplas mortas devem ser proporcionais à mudança real; se não forem, o `IS DISTINCT FROM` do upsert não está filtrando |
+
+### Ainda pendente
+
+- **Rodada de paridade** contra o `tenable_full.csv` do `extraction` — não
+  executada. Condições obrigatórias em [motor.md §8.1](motor.md).
+- **CronJob no EKS** — só depois da paridade fechar.
+- **Clientes HTTP** (JSM e API clássica) nunca executados contra os serviços
+  reais; testados apenas com sessão injetada.
+
+## 13. Referências oficiais
 
 - [Data Stream properties](https://docs.tenable.com/vulnerability-management/Content/Settings/data-stream/data-stream-properties.htm)
 - [Manifest files](https://docs.tenable.com/vulnerability-management/Content/Settings/data-stream/manifest-files.htm)
