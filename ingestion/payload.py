@@ -277,6 +277,7 @@ class LinhaPlugin:
     cvss4_base_score: decimal.Decimal | None = None
     epss_score: decimal.Decimal | None = None
     vpr_score: decimal.Decimal | None = None
+    exploitability_ease: str | None = None
     exploit_available: bool | None = None
     exploited_by_malware: bool | None = None
     in_the_news: bool | None = None
@@ -603,6 +604,7 @@ def _achatar_plugin(
         cvss4_base_score=numero(plugin.get("cvss4_base_score")),
         epss_score=numero(plugin.get("epss_score")),
         vpr_score=vpr_score,
+        exploitability_ease=texto(plugin.get("exploitability_ease")),
         exploit_available=booleano(plugin.get("exploit_available")),
         exploited_by_malware=booleano(plugin.get("exploited_by_malware")),
         in_the_news=booleano(plugin.get("in_the_news")),

@@ -559,3 +559,18 @@ def test_whitelist_tem_exatamente_tres_tipos():
         "FINDING", "WAS_FINDING", "FINDING_ENRICHED_ATTRIBUTES"
     }
     assert "HOST_AUDIT_FINDING" not in TIPOS_PAYLOAD
+
+
+def test_plugin_promove_exploitability_ease_como_texto():
+    """`nota_exploit` do motor de risco lê este campo como texto.
+
+    O Data Stream manda `null` onde a API clássica manda string, e a regra de
+    scoring trata os dois: vazio ou "no known exploit" vale 10, qualquer outro
+    texto vale 100. Por isso o campo é promovido como texto, não como boolean."""
+    assert _um(VM, [finding_vm()]).plugins[0].exploitability_ease is None
+
+    registro = finding_vm()
+    registro["plugin"]["exploitability_ease"] = "Exploits are available"
+    assert (
+        _um(VM, [registro]).plugins[0].exploitability_ease == "Exploits are available"
+    )
