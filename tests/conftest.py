@@ -105,6 +105,7 @@ def payload(tipo: str, updates: list) -> bytes:
 TABELAS_DE_TESTE = (
     "plugin_layer",
     "context_sync",
+    "jira_ticket",
     "threat_intel",
     "architecture",
     "cmdb_url",

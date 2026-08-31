@@ -37,6 +37,10 @@ class ConfigMotor:
     jira_cloud_id: str | None = None
     cmdb_cache_horas: float = 24.0
 
+    # Jira Service Desk (vinculo finding -> ticket)
+    jira_sd_service_desk_id: str | None = None
+    jira_sd_queue_id: str | None = None
+
     # Threat intel (API clássica do Tenable)
     tenable_access_key: str | None = None
     tenable_secret_key: str | None = None
@@ -53,6 +57,14 @@ class ConfigMotor:
     @property
     def tem_intel(self) -> bool:
         return bool(self.tenable_access_key and self.tenable_secret_key)
+
+    @property
+    def tem_jira(self) -> bool:
+        """Alem da credencial, precisa saber QUAL fila ler."""
+        return bool(
+            self.jira_email and self.jira_token and self.jira_base_url
+            and self.jira_sd_service_desk_id and self.jira_sd_queue_id
+        )
 
 
 def _booleano(nome: str, padrao: bool) -> bool:
@@ -87,6 +99,8 @@ def carregar_config() -> ConfigMotor:
         jira_base_url=os.getenv("JIRA_BASE_URL") or None,
         jira_cloud_id=os.getenv("JIRA_CLOUD_ID") or None,
         cmdb_cache_horas=float(os.getenv("CMDB_CACHE_HOURS", "24")),
+        jira_sd_service_desk_id=os.getenv("JIRA_SD_SERVICE_DESK_ID") or None,
+        jira_sd_queue_id=os.getenv("JIRA_SD_QUEUE_ID") or None,
         tenable_access_key=os.getenv("ACCESS_KEY") or None,
         tenable_secret_key=os.getenv("SECRET_KEY") or None,
         verify_tls=_booleano("VERIFY_TLS", True),

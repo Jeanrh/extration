@@ -28,7 +28,7 @@ migrations/     Alembic + DDL versionada do schema (comum aos dois)
 deploy/         base Kubernetes (CronJobs) e template de alarmes CloudWatch
 scripts/        harness de PostgreSQL descartável para os testes
 samples/        payloads de exemplo reais — fixtures da suíte
-tests/          suíte completa (345 testes)
+tests/          suíte completa (387 testes)
 docs/           spec, motor, runbook operacional e mapa de aceite
 legacy/         exportador CSV anterior ao pipeline, mantido em separado
 main.py         entry point equivalente a `python -m ingestion.cli`

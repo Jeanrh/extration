@@ -32,7 +32,7 @@ def configurar_logging(nivel: str = "INFO") -> None:
 
 
 def cmd_sync_context(config: ConfigMotor, args: argparse.Namespace) -> int:
-    """Recarrega CMDB, arquitetura e threat intel.
+    """Recarrega CMDB, arquitetura, threat intel e os tickets do Jira.
 
     Cada fonte é independente: uma indisponível não impede as outras, e o
     snapshot anterior dela sobrevive. O motor prefere contexto de um ciclo
@@ -64,6 +64,26 @@ def cmd_sync_context(config: ConfigMotor, args: argparse.Namespace) -> int:
             log.info("intel | findings=%s", sincronizar_threat_intel(extrator_de_intel(config), conn))
         else:
             log.warning("intel | ACCESS_KEY/SECRET_KEY ausentes — snapshot anterior mantido")
+
+        if config.tem_jira:
+            from .contexto.jira import extrator_de_jira, sincronizar_jira
+
+            r = sincronizar_jira(extrator_de_jira(config), conn)
+            log.info(
+                "jira | tickets=%s | sem_finding_id=%s | rebuscados=%s",
+                r.tickets, r.sem_finding_id, r.rebuscados,
+            )
+            if r.tickets and r.sem_finding_id == r.tickets:
+                # Todo card da fila sem vinculo e o sintoma de template
+                # trocado: o regex parou de casar e o export vai esvaziar.
+                log.warning(
+                    "jira | NENHUM card tem 'Finding ID:' na descricao — "
+                    "o formato do template provavelmente mudou"
+                )
+        else:
+            log.warning(
+                "jira | credenciais ou IDs de fila ausentes — snapshot anterior mantido"
+            )
 
     return 0
 
@@ -143,7 +163,8 @@ def montar_parser() -> argparse.ArgumentParser:
         description="Motor de risco: recalcula a prioridade de todo finding, sem filtro de tempo.",
     )
     sub = parser.add_subparsers(dest="comando", required=True)
-    sub.add_parser("sync-context", help="recarrega CMDB, arquitetura e threat intel")
+    sub.add_parser("sync-context",
+                   help="recarrega CMDB, arquitetura, threat intel e Jira")
     sub.add_parser("run", help="deriva camadas e recalcula o risco de tudo")
     sub.add_parser("status", help="saúde do motor e distribuição de prioridade")
     return parser
