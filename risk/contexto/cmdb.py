@@ -64,6 +64,8 @@ def _linhas_de_sigla(siglas: list[dict], cockpits: dict[str, tuple[str, str]]) -
             s.get("BIA", ""),
             s.get("criticality", ""),
             *cockpits.get((s.get("teamid") or "").strip(), ("", "")),
+            # equipe solucionadora vem da propria sigla, nao do cockpit
+            s.get("team", ""),
             s.get("infrastructure", ""),
         )
         for s in siglas
@@ -154,7 +156,7 @@ def sincronizar_cmdb(extrator, conn, max_age_hours: float | None = None) -> Resu
     with conn.transaction(), conn.cursor() as cur:
         _recarregar(cur, "cmdb_acronym", (
             "sigla", "nome", "status", "pci", "bia", "criticality",
-            "unidade_negocio", "tribo", "infrastructure",
+            "unidade_negocio", "tribo", "equipe_solucionadora", "infrastructure",
         ), linhas_sigla)
         _recarregar(cur, "cmdb_server", (
             "hostname", "ipv4", "sigla", "acronym_raw",

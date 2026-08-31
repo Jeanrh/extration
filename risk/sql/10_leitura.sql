@@ -35,6 +35,7 @@ SELECT fc.finding_id,
        COALESCE(a.criticality, '')                            AS criticality_cmdb,
        COALESCE(a.unidade_negocio, '')                        AS unidade_negocio,
        COALESCE(a.tribo, '')                                  AS tribo,
+       COALESCE(a.equipe_solucionadora, '')                   AS equipe_solucionadora,
        COALESCE(ar.arquitetura, '')                           AS arquitetura,
        (ti.finding_id IS NOT NULL)                            AS em_threat_intel
   FROM finding_current fc

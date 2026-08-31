@@ -7,8 +7,9 @@ O cockpit é resolvido **no sync**, em memória: `teamid` da sigla casa com a
 leitura dos ~500 mil findings não precisa de mais um JOIN, e o `teamid` não
 vira coluna de ninguém — ele é chave de busca, não informação de negócio.
 
-O que sai do CMDB para o consumidor é só isto: **sigla, unidade de negócio
-(aliança) e tribo**.
+O que sai do CMDB para o consumidor: **sigla, unidade de negócio (aliança),
+tribo** — do cockpit — e **equipe solucionadora**, que vem do campo `team` da
+própria sigla.
 
 Os dicionários abaixo são os do CMDB de produção, copiados sem edição — é a
 única forma de garantir que o motor casa com o vocabulário real.
@@ -101,8 +102,11 @@ def test_sem_cockpit_correspondente_a_sigla_fica_sem_tribo(conn):
 
 
 def test_o_contexto_carrega_so_o_que_o_negocio_pediu(conn):
-    """Domínio, subdomínio, equipe e ids de junção não são informação de
-    negócio — são plumbing, e plumbing não vira coluna."""
+    """Domínio, subdomínio e ids de junção não são informação de negócio — são
+    plumbing, e plumbing não vira coluna.
+
+    `equipe_solucionadora` é o contrário: foi cortada na 0008 e devolvida na
+    0009, porque o export dos times usa. Ela vem do campo `team` da sigla."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT column_name FROM information_schema.columns "
@@ -110,10 +114,8 @@ def test_o_contexto_carrega_so_o_que_o_negocio_pediu(conn):
         )
         colunas = {linha["column_name"] for linha in cur.fetchall()}
 
-    assert {"unidade_negocio", "tribo"} <= colunas
-    assert not colunas & {
-        "domain", "subdomain", "equipe_sol", "equipe_solucionadora", "equipe_id"
-    }
+    assert {"unidade_negocio", "tribo", "equipe_solucionadora"} <= colunas
+    assert not colunas & {"domain", "subdomain", "equipe_sol", "equipe_id"}
 
 
 def test_a_tabela_de_cockpit_nao_existe_mais(conn):

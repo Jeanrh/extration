@@ -73,6 +73,7 @@ class Achado:
     criticality_cmdb: str = ""
     unidade_negocio: str = ""          # aliança do cockpit
     tribo: str = ""
+    equipe_solucionadora: str = ""
     arquitetura: str = ""
     em_threat_intel: bool = False
 

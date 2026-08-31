@@ -27,6 +27,7 @@ CREATE TEMP TABLE stg_risk (
     criticality_cmdb  text,
     unidade_negocio   text,
     tribo             text,
+    equipe_solucionadora text,
     arch_type         text,
     layer             text,
     familia           text,
