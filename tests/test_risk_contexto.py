@@ -50,6 +50,7 @@ SIGLA_GTEC = {
     "BIA": "Alto",
     "criticality": "Crise",
     "team": "Time Infra",
+    "teamid": "OR-77",
     "domain": "Tecnologia",
     "subdomain": "Infraestrutura",
     "infrastructure": "OnPremise",
@@ -69,7 +70,8 @@ URL = {
     "pci": "PCI",
     "alliance": "Varejo",
 }
-TIME = {"name": "Time Infra", "tribo": "Plataformas", "alianca": "Varejo", "vp": "VP Tecnologia"}
+TIME = {"key": "OR-77", "name": "Time Infra", "tribo": "Plataformas",
+        "alianca": "Varejo", "vp": "VP Tecnologia"}
 
 
 def _sincronizar(conn, **kwargs):
@@ -83,13 +85,15 @@ def test_sigla_chega_com_os_atributos_que_movem_o_vetor_py(conn):
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT pci, bia, criticality, equipe_sol FROM cmdb_acronym WHERE sigla = 'GTEC'"
+            "SELECT pci, bia, criticality, unidade_negocio, tribo "
+            "  FROM cmdb_acronym WHERE sigla = 'GTEC'"
         )
         assert cur.fetchone() == {
             "pci": "PCI",
             "bia": "Alto",
             "criticality": "Crise",
-            "equipe_sol": "Time Infra",
+            "unidade_negocio": "Varejo",
+            "tribo": "Plataformas",
         }
 
 

@@ -38,16 +38,15 @@ def _finding(cur, finding_id, product="VM", state="OPEN", hostname="SRV-APP-01",
 
 def _contexto(cur, sigla="GTEC", criticality="Crise", pci="PCI", arquitetura="Infra"):
     cur.execute(
-        "INSERT INTO cmdb_acronym (sigla, pci, bia, criticality, equipe_sol) "
-        "VALUES (%s, %s, 'Alto', %s, 'Time Infra')",
+        "INSERT INTO cmdb_acronym (sigla, pci, bia, criticality, "
+        "unidade_negocio, tribo) "
+        "VALUES (%s, %s, 'Alto', %s, 'Varejo', 'Plataformas')",
         (sigla, pci, criticality),
     )
     cur.execute(
         "INSERT INTO cmdb_server (hostname, ipv4, sigla) VALUES ('SRV-APP-01', '10.0.0.7', %s)",
         (sigla,),
     )
-    cur.execute("INSERT INTO cmdb_team (nome, tribo, alianca, vp) "
-                "VALUES ('TIME INFRA', 'Plataformas', 'Varejo', 'VP Tecnologia')")
     cur.execute("INSERT INTO architecture (sigla, arquitetura) VALUES (%s, %s)",
                 (sigla, arquitetura))
     cur.execute("INSERT INTO plugin_layer (plugin_id, layer, familia, resolved_by) "
@@ -109,7 +108,7 @@ def test_o_contexto_do_cmdb_chega_gravado_na_linha(conn):
         assert cur.fetchone() == {
             "sigla": "GTEC",
             "criticality_cmdb": "Crise",
-            "unidade_negocio": "VP Tecnologia",
+            "unidade_negocio": "Varejo",   # aliança, não VP
             "arch_type": "Infra",
             "layer": "banco de dados",
             "familia": "oracle",

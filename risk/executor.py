@@ -28,6 +28,7 @@ COLUNAS_STAGING = (
     "nota_bia", "nota_pci", "nota_exposure", "nota_arch",
     "nota_cvss", "nota_threat", "nota_exploit", "nota_layer",
     "sigla", "pci", "bia", "criticality_cmdb", "unidade_negocio",
+    "tribo",
     "arch_type", "layer", "familia", "engine_version", "context_synced_at",
 )
 
@@ -70,6 +71,7 @@ def _achado(linha: dict) -> Achado:
         bia=linha["bia"],
         criticality_cmdb=linha["criticality_cmdb"],
         unidade_negocio=linha["unidade_negocio"],
+        tribo=linha["tribo"],
         arquitetura=linha["arquitetura"],
         em_threat_intel=linha["em_threat_intel"],
     )
@@ -85,7 +87,8 @@ def _tupla_staging(achado: Achado, veredito, engine_version: str, context_synced
         veredito.nota_arch, veredito.nota_cvss, veredito.nota_threat,
         veredito.nota_exploit, veredito.nota_layer,
         achado.sigla, achado.pci, achado.bia, achado.criticality_cmdb,
-        achado.unidade_negocio, veredito.arch_type, veredito.layer,
+        achado.unidade_negocio, achado.tribo,
+        veredito.arch_type, veredito.layer,
         veredito.familia,
         engine_version, context_synced_at,
     )

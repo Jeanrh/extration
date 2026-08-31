@@ -1727,7 +1727,7 @@ O sistema **NÃO DEVE** implementar nada desta lista. Se surgir necessidade,
 | Dashboard web | outro time (em andamento em paralelo) |
 | **Motor de recálculo de risco** | implementado em `risk/`, como CronJob separado ([motor.md](motor.md)). Fora do escopo **deste job**: a ingestão não o executa, não o importa e não calcula risco |
 | Crawler de tickets Jira | outro time; lê `finding_current` e compara com o Jira por `finding_id` |
-| Enriquecimento com CMDB (sigla, time, unidade de negócio) | feito pelo motor, em tabelas próprias ([motor.md §4.2](motor.md)); a ingestão segue sem join com CMDB |
+| Enriquecimento com CMDB (sigla, unidade de negócio, tribo) | feito pelo motor, em tabelas próprias ([motor.md §4.2](motor.md) e [§4.4](motor.md)); a ingestão segue sem join com CMDB |
 | Enriquecimento com Jira e marcações de negócio | ainda sem dono |
 | Controle de acesso, mascaramento, auditoria de leitura | quem constrói em cima do banco |
 | Ingestão de `asset`, `was_asset`, `tags`, `asset_enriched_attributes`, `host_audit_finding` | fase futura, se necessário |

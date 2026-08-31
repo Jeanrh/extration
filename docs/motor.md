@@ -39,7 +39,8 @@ sendo exatamente o que já era:
 | finding, asset, plugin, estado, datas | PostgreSQL (`finding_current`, `plugin`) | **sim** — antes vinha do export/S3 |
 | threat intel (`nota_threat`) | API clássica do Tenable, filtro `cve_category` | não |
 | família e camada (`nota_layer`) | Vault (keywords) + `plugin.family` | não |
-| sigla, PCI, BIA, criticidade, unidade de negócio | CMDB (Atlassian Assets/JSM) | não |
+| sigla, PCI, BIA, criticidade | CMDB (Atlassian Assets/JSM) | não |
+| unidade de negócio (= aliança) e tribo | CMDB, via cockpit | não |
 | arquitetura (`nota_arch`) | `risk/referencia/arquitetura.csv`, versionado | não |
 
 **Fora do escopo:** enriquecimento Jira, marcações de negócio (falso positivo,
@@ -115,7 +116,7 @@ o job leva essa decisão até o fim.
 
 ## 4. Modelo de dados
 
-Três migrações. Cada uma acompanha o código que a usa, em vez de criar schema
+Quatro migrações. Cada uma acompanha o código que a usa, em vez de criar schema
 especulativo.
 
 ### 4.1 `0005_risk_engine` — o veredito
@@ -126,7 +127,8 @@ Expande `finding_risk`, que nasceu vazia na `0001` justamente para isto:
 - **as oito notas**: `nota_bia`, `nota_pci`, `nota_exposure`, `nota_arch`,
   `nota_cvss`, `nota_threat`, `nota_exploit`, `nota_layer`
 - **contexto resolvido**: `sigla`, `pci`, `bia`, `criticality_cmdb`,
-  `unidade_negocio`, `arch_type`, `layer`, `familia`
+  `unidade_negocio`, `tribo`, `arch_type`, `layer`, `familia`
+  (`tribo` entra na [`0008`](#44-0008_unidade_negocio--unidade-de-negócio-e-tribo))
 - **procedência**: `context_synced_at`
 
 As oito notas ficam gravadas de propósito. Sem elas, responder "por que este
@@ -140,7 +142,7 @@ Também: `RISK_CHANGED` entra no CHECK de `finding_event.event_type`, e
 
 ### 4.2 `0006_risk_context` — as fontes externas
 
-`cmdb_acronym`, `cmdb_server`, `cmdb_url`, `cmdb_team`, `architecture`,
+`cmdb_acronym`, `cmdb_server`, `cmdb_url`, `architecture`,
 `threat_intel` e `context_sync`. Cada tabela é recarregada por inteiro dentro de
 **uma** transação, e a busca acontece **antes** dela: se a fonte cair no meio,
 as tabelas nunca chegaram a ser tocadas.
@@ -158,6 +160,42 @@ por finding (centenas de milhares) transforma a `nota_layer` num JOIN.
 
 `resolved_by` (`plugin_name` | `family` | `nenhum`) permite medir, depois de uma
 rodada real, quanto da camada saiu do Vault e quanto caiu no fallback.
+
+### 4.4 `0008_unidade_negocio` — unidade de negócio e tribo
+
+Do CMDB saem para o consumidor exatamente três campos — **sigla, unidade de
+negócio e tribo** —, resolvidos por esta cadeia:
+
+```
+servidor.acronym / url.acronym
+   └─> sigla ──┬─> CMDB:  BIA, PCI, criticality
+               ├─> CSV:   arquitetura            (arquivo mocado, versionado)
+               └─> teamid ──> cockpit (por chave):  aliança + tribo
+                                (resolvido no sync, não na leitura)
+```
+
+Domínio, subdomínio e equipe solucionadora saíram: ninguém prioriza por eles.
+
+Duas correções de semântica, ambas encontradas confrontando o código com o
+payload real do CMDB:
+
+- **unidade de negócio é a `alianca` do cockpit**, não a `vp`.
+- **o casamento sigla → cockpit é por id**, via `teamid` ("OR-345014") = `key`
+  do cockpit. Por nome não funcionava: o `name` do cockpit é o rótulo da
+  **tribo** ("GARAGEM") e o `team` da sigla é o da **equipe** ("Plataforma de
+  Deploy"). Casavam só por coincidência, e `unidade_negocio` chegava
+  praticamente vazia ao consumidor.
+
+O casamento acontece **no sync**, em memória, e o resultado é gravado direto em
+`cmdb_acronym`. Daí não existir coluna de id nem tabela `cmdb_team`: id de
+junção é plumbing, e plumbing não vira coluna. Resolver na carga (dezenas de
+milhares de siglas) em vez de na leitura (centenas de milhares de findings)
+também tira um JOIN do caminho quente — a `0008` derruba a `cmdb_team` criada
+pela `0006`.
+
+> Cuidado ao ler o mapeador: `nota_bia` consome `criticality`
+> (Crise/Alto/Medio/Baixo), **não** o campo `BIA` do CMDB, que é "Sim"/"Nao".
+> O nome veio do extraction; `bia` viaja apenas como contexto.
 
 ---
 

@@ -107,7 +107,6 @@ TABELAS_DE_TESTE = (
     "context_sync",
     "threat_intel",
     "architecture",
-    "cmdb_team",
     "cmdb_url",
     "cmdb_server",
     "cmdb_acronym",

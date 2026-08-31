@@ -71,7 +71,8 @@ class Achado:
     pci: str = ""
     bia: str = ""
     criticality_cmdb: str = ""
-    unidade_negocio: str = ""
+    unidade_negocio: str = ""          # aliança do cockpit
+    tribo: str = ""
     arquitetura: str = ""
     em_threat_intel: bool = False
 

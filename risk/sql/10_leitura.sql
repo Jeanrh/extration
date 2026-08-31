@@ -33,7 +33,8 @@ SELECT fc.finding_id,
        COALESCE(a.pci, '')                                    AS pci,
        COALESCE(a.bia, '')                                    AS bia,
        COALESCE(a.criticality, '')                            AS criticality_cmdb,
-       COALESCE(t.vp, '')                                     AS unidade_negocio,
+       COALESCE(a.unidade_negocio, '')                        AS unidade_negocio,
+       COALESCE(a.tribo, '')                                  AS tribo,
        COALESCE(ar.arquitetura, '')                           AS arquitetura,
        (ti.finding_id IS NOT NULL)                            AS em_threat_intel
   FROM finding_current fc
@@ -49,7 +50,6 @@ SELECT fc.finding_id,
   LEFT JOIN cmdb_url        u  ON fc.product = 'WAS'
                               AND u.url = upper(fc.asset_fqdn)
   LEFT JOIN cmdb_acronym    a  ON a.sigla = COALESCE(sv.sigla, ip.sigla, u.sigla)
-  LEFT JOIN cmdb_team       t  ON t.nome  = upper(a.equipe_sol)
   LEFT JOIN architecture    ar ON ar.sigla = COALESCE(sv.sigla, ip.sigla, u.sigla)
   LEFT JOIN threat_intel    ti ON ti.finding_id = fc.finding_id
  WHERE fc.deleted_at IS NULL

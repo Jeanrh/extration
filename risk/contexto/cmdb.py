@@ -34,7 +34,27 @@ class ResultadoSync:
         return self.siglas + self.servidores + self.urls + self.times
 
 
-def _linhas_de_sigla(siglas: list[dict]) -> list[tuple]:
+def _indice_de_cockpit(times: list[dict]) -> dict[str, tuple[str, str]]:
+    """`key` do cockpit → (unidade de negócio, tribo).
+
+    Indexado pela chave do Jira, nunca pelo nome: o `name` do cockpit é o
+    rótulo da **tribo** ("GARAGEM") e o `team` da sigla é o da **equipe**
+    ("Plataforma de Deploy"). Casar esses dois por texto acerta por acidente.
+
+    Unidade de negócio é a aliança — não a VP."""
+    return {
+        chave: (t.get("alianca", ""), t.get("tribo", ""))
+        for t in times
+        if (chave := (t.get("key") or "").strip())
+    }
+
+
+def _linhas_de_sigla(siglas: list[dict], cockpits: dict[str, tuple[str, str]]) -> list[tuple]:
+    """A sigla já sai daqui com unidade de negócio e tribo resolvidas.
+
+    Resolver na carga (dezenas de milhares de siglas) em vez de na leitura
+    (centenas de milhares de findings) tira um JOIN do caminho quente. O
+    `teamid` morre aqui: é chave de busca, não informação de negócio."""
     return [
         (
             s["acronym"].upper(),
@@ -43,9 +63,7 @@ def _linhas_de_sigla(siglas: list[dict]) -> list[tuple]:
             s.get("PCI", ""),
             s.get("BIA", ""),
             s.get("criticality", ""),
-            s.get("team", ""),
-            s.get("domain", ""),
-            s.get("subdomain", ""),
+            *cockpits.get((s.get("teamid") or "").strip(), ("", "")),
             s.get("infrastructure", ""),
         )
         for s in siglas
@@ -92,21 +110,6 @@ def _linhas_de_url(urls: list[dict], codigos, nomes) -> list[tuple]:
     return list(vistos.values())
 
 
-def _linhas_de_time(times: list[dict]) -> list[tuple]:
-    vistos: dict[str, tuple] = {}
-    for t in times:
-        nome = (t.get("name") or "").strip()
-        if not nome:
-            continue
-        vistos[nome.upper()] = (
-            nome.upper(),
-            t.get("tribo", ""),
-            t.get("alianca", ""),
-            t.get("vp", ""),
-        )
-    return list(vistos.values())
-
-
 def _recarregar(cur, tabela: str, colunas: tuple[str, ...], linhas: list[tuple]) -> None:
     cur.execute(f"TRUNCATE {tabela}")
     if not linhas:
@@ -119,7 +122,10 @@ def _recarregar(cur, tabela: str, colunas: tuple[str, ...], linhas: list[tuple])
 
 
 def sincronizar_cmdb(extrator, conn, max_age_hours: float | None = None) -> ResultadoSync:
-    """Recarrega as quatro tabelas do CMDB a partir do extrator do JSM.
+    """Recarrega as três tabelas do CMDB a partir do extrator do JSM.
+
+    Os cockpits não viram tabela: eles são consumidos aqui mesmo, para
+    carimbar unidade de negócio e tribo em cada sigla.
 
     `extrator` só precisa expor `extract_acronyms`, `extract_servers`,
     `extract_urls` e `extract_cockpits` — é o contrato do `CMDBExtractor`, e é
@@ -132,16 +138,15 @@ def sincronizar_cmdb(extrator, conn, max_age_hours: float | None = None) -> Resu
     times = extrator.extract_cockpits(max_age_hours=max_age_hours)
 
     codigos, nomes = indices_de_sigla(siglas)
-    linhas_sigla = _linhas_de_sigla(siglas)
+    linhas_sigla = _linhas_de_sigla(siglas, _indice_de_cockpit(times))
     linhas_servidor = _linhas_de_servidor(servidores, codigos, nomes)
     linhas_url = _linhas_de_url(urls, codigos, nomes)
-    linhas_time = _linhas_de_time(times)
 
     resultado = ResultadoSync(
         siglas=len(linhas_sigla),
         servidores=len(linhas_servidor),
         urls=len(linhas_url),
-        times=len(linhas_time),
+        times=len(times),
         sincronizado_em=dt.datetime.now(dt.timezone.utc),
     )
 
@@ -149,7 +154,7 @@ def sincronizar_cmdb(extrator, conn, max_age_hours: float | None = None) -> Resu
     with conn.transaction(), conn.cursor() as cur:
         _recarregar(cur, "cmdb_acronym", (
             "sigla", "nome", "status", "pci", "bia", "criticality",
-            "equipe_sol", "domain", "subdomain", "infrastructure",
+            "unidade_negocio", "tribo", "infrastructure",
         ), linhas_sigla)
         _recarregar(cur, "cmdb_server", (
             "hostname", "ipv4", "sigla", "acronym_raw",
@@ -158,7 +163,6 @@ def sincronizar_cmdb(extrator, conn, max_age_hours: float | None = None) -> Resu
         _recarregar(cur, "cmdb_url", (
             "url", "sigla", "acronym_raw", "status", "pci", "alliance",
         ), linhas_url)
-        _recarregar(cur, "cmdb_team", ("nome", "tribo", "alianca", "vp"), linhas_time)
 
         registrar_sync(
             cur, FONTE, "OK", resultado.total,
