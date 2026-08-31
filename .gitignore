@@ -9,6 +9,9 @@ __pycache__/
 htmlcov/
 .env
 *.csv
+# Excecao: dado de referencia mantido a mao e editado em PR, nao saida de
+# exportacao. O motor de risco le arquitetura.csv como fonte de verdade.
+!risk/referencia/*.csv
 .postgres-test/
 # Clusters e sockets temporários do PostgreSQL usados nos testes locais.
 .postgres/

@@ -82,6 +82,7 @@ CREATE TEMP TABLE stg_plugin (
     cvss4_base_score        numeric,
     epss_score              numeric,
     vpr_score               numeric,
+    exploitability_ease     text,
     exploit_available       boolean,
     exploited_by_malware    boolean,
     in_the_news             boolean,

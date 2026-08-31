@@ -103,6 +103,13 @@ def payload(tipo: str, updates: list) -> bytes:
 # Fixtures do pipeline de ingestão
 # ===========================================================================
 TABELAS_DE_TESTE = (
+    "plugin_layer",
+    "context_sync",
+    "threat_intel",
+    "architecture",
+    "cmdb_url",
+    "cmdb_server",
+    "cmdb_acronym",
     "finding_risk",
     "finding_event",
     "finding_recast",

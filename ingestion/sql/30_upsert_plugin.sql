@@ -11,7 +11,7 @@ INSERT INTO plugin AS p (
     plugin_id, name, family, risk_factor, type, synopsis, description, solution,
     see_also, cve, cwe, cpe,
     cvss2_base_score, cvss3_base_score, cvss4_base_score, epss_score, vpr_score,
-    exploit_available, exploited_by_malware, in_the_news, has_patch,
+    exploitability_ease, exploit_available, exploited_by_malware, in_the_news, has_patch,
     unsupported_by_vendor,
     publication_date, patch_publication_date, modification_date,
     source_indexed, raw, updated_at
@@ -20,7 +20,7 @@ SELECT DISTINCT ON (plugin_id)
        plugin_id, name, family, risk_factor, type, synopsis, description, solution,
        see_also, cve, cwe, cpe,
        cvss2_base_score, cvss3_base_score, cvss4_base_score, epss_score, vpr_score,
-       exploit_available, exploited_by_malware, in_the_news, has_patch,
+       exploitability_ease, exploit_available, exploited_by_malware, in_the_news, has_patch,
        unsupported_by_vendor,
        publication_date, patch_publication_date, modification_date,
        indexed, raw, now()
@@ -44,6 +44,7 @@ ON CONFLICT (plugin_id) DO UPDATE SET
     cvss4_base_score       = EXCLUDED.cvss4_base_score,
     epss_score             = EXCLUDED.epss_score,
     vpr_score              = EXCLUDED.vpr_score,
+    exploitability_ease    = EXCLUDED.exploitability_ease,
     exploit_available      = EXCLUDED.exploit_available,
     exploited_by_malware   = EXCLUDED.exploited_by_malware,
     in_the_news            = EXCLUDED.in_the_news,

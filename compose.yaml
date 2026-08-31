@@ -12,3 +12,20 @@ services:
       interval: 2s
       timeout: 5s
       retries: 15
+
+  # Bateria de ponta a ponta com massa sintetica. Fica atras de um profile para
+  # nao subir junto com o banco: `podman compose --profile simulacao up motor`.
+  #
+  # `scripts/` entra por volume em vez de ir para a imagem — a simulacao e
+  # ferramenta de mesa e nao tem por que viajar para producao.
+  motor:
+    build: .
+    profiles: ["simulacao"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/app/scripts:ro
+    entrypoint: ["python", "-m", "scripts.simular"]
+    command: ["--dsn", "postgresql://postgres@postgres:5432/simulacao",
+              "--findings", "50000"]

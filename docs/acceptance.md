@@ -9,6 +9,12 @@ texto. O que depende de bucket real, console Tenable, e-mail do Data Stream,
 HML/produção, EKS ou AWS permanece explicitamente pendente, com o comando que
 o operador deve executar no ambiente real.
 
+**Escopo:** este documento cobre apenas a **ingestão**. O motor de risco
+(`risk/`) tem critérios próprios e nasceu depois destes nove — o estado
+verificável de cada item dele está em [motor.md §8](motor.md), com a mesma
+legenda. Os dois são independentes: a ingestão pode ir para produção sem o
+motor, e nesse caso as views caem no `severity` nativo do Tenable.
+
 ## Legenda
 
 | Estado | Significado |
