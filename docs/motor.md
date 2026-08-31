@@ -41,6 +41,8 @@ sendo exatamente o que já era:
 | família e camada (`nota_layer`) | Vault (keywords) + `plugin.family` | não |
 | sigla, PCI, BIA, criticidade | CMDB (Atlassian Assets/JSM) | não |
 | unidade de negócio (= aliança) e tribo | CMDB, via cockpit | não |
+| equipe solucionadora | CMDB, campo `team` da sigla | não |
+| ticket, status e plano de ação | Jira Service Desk, fila de vulnerabilidades | não |
 | arquitetura (`nota_arch`) | `risk/referencia/arquitetura.csv`, versionado | não |
 
 **Fora do escopo:** enriquecimento Jira, marcações de negócio (falso positivo,
